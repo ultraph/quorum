@@ -103,6 +103,39 @@ It binds to `127.0.0.1` only (localhost) — it runs with your keys, so it is no
 exposed to the network. The CLI has zero dependencies; these extras are needed
 only for `--web`.
 
+### Hit an "externally-managed environment" error?
+
+On recent Debian / Ubuntu / Linux Mint, `pip install` refuses to touch the
+system Python on purpose (to avoid breaking it). That's not a bug. Install the
+web extras into an isolated **virtual environment (venv)** instead - no sudo,
+nothing touches your system:
+
+```bash
+cd ~/quorum                                  # the cloned repo folder
+python3 -m venv .venv                         # create an isolated environment
+.venv/bin/pip install -r requirements-web.txt # install web deps inside it
+.venv/bin/python quorum.py --web              # run the web UI from it
+```
+
+What each line does:
+
+1. go into the project folder;
+2. create `.venv` - a private Python that lives in the project, separate from
+   the system one;
+3. install the web dependencies **into that venv** (the system stays untouched);
+4. launch the web UI using the venv's Python.
+
+From then on, start the web UI with the same last line:
+`.venv/bin/python quorum.py --web`. The plain CLI (`python3 quorum.py "..."`)
+still needs no venv - it has zero dependencies.
+
+**If step 2 fails** with a message about `ensurepip` or `python3-venv`, the
+venv module isn't installed yet - add it once, then re-run:
+
+```bash
+sudo apt install python3-venv
+```
+
 ## Exit codes
 
 `0` all models answered · `1` some failed (judged without them; names + reasons
