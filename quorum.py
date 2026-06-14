@@ -364,7 +364,7 @@ def run_setup() -> None:
             print(f"  Auth: [1] API key   [2] Local CLI login "
                   f"({meta['cli']} — uses your subscription/login)")
             auth = "cli" if _ask("  Choose 1 or 2", "1") == "2" else "api"
-        name = _ask("  Short name (label)", meta["default_name"])
+        name = meta["default_name"]  # auto — one provider, one fixed label
         model = _ask("  Model id", meta["default_model"])
         e = {"name": name, "provider": prov, "model": model, "auth": auth}
         if auth == "api":
