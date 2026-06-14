@@ -65,7 +65,7 @@ cp config.example.toml ~/.config/quorum/config.toml
 | Mode | How it reaches the model | Cost | Notes |
 |------|--------------------------|------|-------|
 | `auth = "api"` | Official API with your key | Pay per token | Portable, reproducible. Recommended. |
-| `auth = "cli"` | Your local CLI login (`claude -p`, `codex exec`) | Your subscription/plan | Anthropic & OpenAI only. **Driving a subscription CLI programmatically may conflict with the provider's terms — that's on you to verify.** |
+| `auth = "cli"` | Your local CLI login (`claude -p`, `codex exec`) | Your subscription/plan | Anthropic & OpenAI only. **Driving a subscription CLI programmatically may conflict with the provider's terms - that's on you to verify.** |
 
 API keys are read from the environment via `api_key = "env:VAR"` (recommended)
 so secrets never live in the config file. Gemini and DeepSeek are API-only.
