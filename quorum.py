@@ -183,8 +183,7 @@ def _cli_codex(m: Model, prompt: str) -> str:
         out = Path(td) / "last.txt"
         p = subprocess.run(
             [binp, "exec", "--model", m.model, "--sandbox", "read-only",
-             "--skip-git-repo-check", "--ephemeral", "--cd", td,
-             "-o", str(out), "-"],
+             "--skip-git-repo-check", "--cd", td, "-o", str(out), "-"],
             input=prompt, capture_output=True, text=True, timeout=420)
         if out.exists() and (txt := out.read_text().strip()):
             return txt
