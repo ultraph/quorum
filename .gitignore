@@ -1,0 +1,8 @@
+# never commit real config / secrets
+config.toml
+*.local.toml
+.env
+# transcripts / scratch
+*.md.out
+__pycache__/
+*.pyc

@@ -1,0 +1,80 @@
+# quorum config — copy to ~/.config/quorum/config.toml and edit.
+# Never commit your real config (it may hold keys). See .gitignore.
+#
+# Each [[panel]] entry is one model on the panel. Two ways to reach a model:
+#   auth = "api"  → official API, needs api_key
+#   auth = "cli"  → your local CLI login (anthropic→`claude -p`, openai→`codex exec`)
+#
+# api_key supports "env:VAR" (read from environment — recommended, keeps secrets
+# out of this file) or a literal string.
+
+# ---- Anthropic (Claude) -----------------------------------------------------
+# API mode (metered, needs an Anthropic API key):
+[[panel]]
+name = "claude"
+provider = "anthropic"
+model = "claude-opus-4-8"        # or claude-sonnet-4-6, claude-haiku-4-5
+auth = "api"
+api_key = "env:ANTHROPIC_API_KEY"
+enabled = true
+
+# CLI mode (uses your Claude Code OAuth login instead of an API key).
+# NOTE: this drives your Claude subscription via the CLI. Make sure your usage
+# complies with the provider's terms. Uncomment to use instead of the above.
+# [[panel]]
+# name = "claude"
+# provider = "anthropic"
+# model = "claude-opus-4-8"
+# auth = "cli"
+# cli_bin = "claude"             # optional explicit path
+# enabled = true
+
+# ---- OpenAI (GPT) -----------------------------------------------------------
+[[panel]]
+name = "gpt"
+provider = "openai"
+model = "gpt-5.5"               # any chat-completions model id
+auth = "api"
+api_key = "env:OPENAI_API_KEY"
+enabled = true
+
+# CLI mode for GPT uses the Codex CLI (`codex exec`):
+# [[panel]]
+# name = "gpt"
+# provider = "openai"
+# model = "gpt-5.5"
+# auth = "cli"
+# cli_bin = "codex"
+# enabled = true
+
+# ---- Google Gemini (API only) ----------------------------------------------
+[[panel]]
+name = "gemini"
+provider = "gemini"
+model = "gemini-2.5-flash"      # free tier is generous on flash
+auth = "api"
+api_key = "env:GEMINI_API_KEY"
+enabled = true
+
+# ---- DeepSeek (API only) ----------------------------------------------------
+[[panel]]
+name = "deepseek"
+provider = "deepseek"
+model = "deepseek-chat"        # check current model ids in DeepSeek docs
+auth = "api"
+api_key = "env:DEEPSEEK_API_KEY"
+enabled = true
+
+# ---- Judge ------------------------------------------------------------------
+# The judge synthesizes the panel. Either reuse a panelist by name:
+[judge]
+enabled = true
+use = "claude"
+
+# ...or define a standalone judge (its own provider/model/auth/api_key):
+# [judge]
+# enabled = true
+# provider = "anthropic"
+# model = "claude-opus-4-8"
+# auth = "api"
+# api_key = "env:ANTHROPIC_API_KEY"
