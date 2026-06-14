@@ -21,22 +21,34 @@ otherwise never see. quorum makes that a one-liner.
 ## Install
 
 ```bash
-git clone <your-repo-url> quorum
+git clone https://github.com/ultraph/quorum.git
 cd quorum
-cp config.example.toml ~/.config/quorum/config.toml   # mkdir -p ~/.config/quorum first
-# edit the config, set your keys (or use auth = "cli")
-python3 quorum.py "your question"
+python3 quorum.py --setup
 ```
 
-Optional convenience wrapper:
+The **interactive setup wizard** walks you through it: pick which providers to
+include, choose API key or local CLI per model, paste your keys (entered
+hidden), choose a judge, and it writes `~/.config/quorum/config.toml`
+(chmod 600) and installs a `quorum` command in `~/.local/bin`. Then:
 
 ```bash
-printf '#!/usr/bin/env bash\nexec python3 %s/quorum.py "$@"\n' "$PWD" > ~/.local/bin/quorum
-chmod +x ~/.local/bin/quorum
+quorum "your question"
 ```
+
+Running `quorum` with no config offers to launch the wizard automatically.
 
 Requirements: Python 3.11+ (for the built-in `tomllib`). For `auth = "cli"`,
 the relevant CLI must be installed and logged in (`claude` / `codex`).
+
+### Manual setup (optional)
+
+Prefer to edit by hand? Copy the example and fill it in:
+
+```bash
+mkdir -p ~/.config/quorum
+cp config.example.toml ~/.config/quorum/config.toml
+# edit it: set keys (or "env:VAR"), or use auth = "cli"
+```
 
 ## Auth: API vs CLI
 
