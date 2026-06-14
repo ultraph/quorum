@@ -42,15 +42,13 @@ Running `quorum` with no config offers to launch the wizard automatically.
 - **Python 3.11+** (for the built-in `tomllib`). No other dependencies.
 - **`auth = "api"`** - just an API key for that provider. No CLI needed.
 - **`auth = "cli"`** - the provider's CLI must be installed **and logged in**:
-  - **Anthropic → `claude`** (Claude Code). Log in: run `claude`, then `/login`.
-    Needs a version with headless print mode (`claude -p`) — any recent release.
-  - **OpenAI → `codex`** (Codex CLI). Log in: `codex login`. **Use a recent
-    version - `0.139+` is tested working; `0.118` is too old and rejects flags
-    quorum uses.** Update with `npm install -g @openai/codex@latest`.
+  - **Anthropic → `claude`** (Claude Code) - log in: run `claude`, then `/login`.
+  - **OpenAI → `codex`** (Codex CLI) - log in: `codex login`.
 
-The setup wizard checks CLI tools are installed and logged in and tells you
-what to fix if not - but it can't check the version, so if a CLI model errors
-with the tool printing its own banner/usage, update that CLI first.
+The setup wizard checks the CLI tools are installed and logged in. If a CLI
+model errors with the tool printing its own banner/usage, update that CLI
+(e.g. `npm install -g @openai/codex@latest`) - very old versions can reject
+flags quorum uses.
 
 ### Manual setup (optional)
 
