@@ -3,9 +3,9 @@
 Ask one question to a **panel of LLMs** at once, then let a **judge** model
 synthesize their answers into agreement / disagreement / a verdict.
 
-You choose who sits on the panel and who judges — with checkboxes or flags.
+You choose who sits on the panel and who judges - with checkboxes or flags.
 Each model can be reached through its **official API** (your key) or through
-your **local CLI login** (`claude -p` / `codex exec`) — your choice, per model.
+your **local CLI login** (`claude -p` / `codex exec`) - your choice, per model.
 
 - **Zero dependencies.** Pure Python standard library. No `pip install`.
 - **Pick your panel.** Interactive checkboxes, or `--panel a,b,c` for scripts.
@@ -15,7 +15,7 @@ your **local CLI login** (`claude -p` / `codex exec`) — your choice, per model
 ## Why
 
 A single model can be confidently wrong. Asking several independent models the
-same question — and having one reconcile them — surfaces disagreement you'd
+same question - and having one reconcile them - surfaces disagreement you'd
 otherwise never see. quorum makes that a one-liner.
 
 ## Install
@@ -40,16 +40,16 @@ Running `quorum` with no config offers to launch the wizard automatically.
 ## Requirements
 
 - **Python 3.11+** (for the built-in `tomllib`). No other dependencies.
-- **`auth = "api"`** — just an API key for that provider. No CLI needed.
-- **`auth = "cli"`** — the provider's CLI must be installed **and logged in**:
+- **`auth = "api"`** - just an API key for that provider. No CLI needed.
+- **`auth = "cli"`** - the provider's CLI must be installed **and logged in**:
   - **Anthropic → `claude`** (Claude Code). Log in: run `claude`, then `/login`.
     Needs a version with headless print mode (`claude -p`) — any recent release.
   - **OpenAI → `codex`** (Codex CLI). Log in: `codex login`. **Use a recent
-    version — `0.139+` is tested working; `0.118` is too old and rejects flags
+    version - `0.139+` is tested working; `0.118` is too old and rejects flags
     quorum uses.** Update with `npm install -g @openai/codex@latest`.
 
 The setup wizard checks CLI tools are installed and logged in and tells you
-what to fix if not — but it can't check the version, so if a CLI model errors
+what to fix if not - but it can't check the version, so if a CLI model errors
 with the tool printing its own banner/usage, update that CLI first.
 
 ### Manual setup (optional)
@@ -101,4 +101,4 @@ Each provider is a small function in `quorum.py` (`_api_*` / `_cli_*`) wired in
 
 ## License
 
-MIT — see LICENSE.
+MIT - see LICENSE.
