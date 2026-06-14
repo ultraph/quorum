@@ -328,7 +328,7 @@ PROVIDERS_META = {
     "gemini":    {"label": "Google (Gemini)", "cli": None,
                   "default_model": "gemini-2.5-flash", "default_name": "gemini"},
     "deepseek":  {"label": "DeepSeek", "cli": None,
-                  "default_model": "deepseek-chat", "default_name": "deepseek"},
+                  "default_model": "deepseek-v4-pro", "default_name": "deepseek"},
 }
 
 

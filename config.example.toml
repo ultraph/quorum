@@ -60,7 +60,10 @@ enabled = true
 [[panel]]
 name = "deepseek"
 provider = "deepseek"
-model = "deepseek-chat"        # check current model ids in DeepSeek docs
+# Your account's exact id may differ. List yours with:
+#   curl -s https://api.deepseek.com/models -H "Authorization: Bearer $KEY"
+# Common ids: deepseek-v4-pro, deepseek-v4-flash, deepseek-chat, deepseek-reasoner
+model = "deepseek-v4-pro"
 auth = "api"
 api_key = "env:DEEPSEEK_API_KEY"
 enabled = true
