@@ -456,6 +456,25 @@ def run_setup() -> None:
     print(f"\n{BOLD}Done.{RST} Try:  quorum \"your question\"")
 
 
+# --- web UI launcher (optional, needs requirements-web.txt) -----------------
+
+def run_web(port: int) -> None:
+    if not CONFIG_PATH.exists():
+        sys.exit(f"{RED}No config:{RST} {CONFIG_PATH}. Run `quorum --setup` first.")
+    try:
+        import uvicorn
+        import webapp
+    except ImportError as e:
+        sys.exit(f"{RED}Web UI needs extra packages.{RST} Install once:\n"
+                 f"  pip install -r requirements-web.txt\n  (missing: {e.name})")
+    import threading
+    import webbrowser
+    url = f"http://127.0.0.1:{port}"
+    threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+    print(f"{BOLD}quorum web UI{RST} → {url}   (Ctrl-C to stop)")
+    uvicorn.run(webapp.app, host="127.0.0.1", port=port, log_level="warning")
+
+
 # --- main -------------------------------------------------------------------
 
 def read_question(args) -> str:
@@ -491,10 +510,17 @@ def main() -> None:
     ap.add_argument("--list", action="store_true", help="list configured models and exit")
     ap.add_argument("--setup", action="store_true",
                     help="interactive wizard: build the config and install the command")
+    ap.add_argument("--web", action="store_true",
+                    help="launch the local web UI in your browser (needs requirements-web.txt)")
+    ap.add_argument("--port", type=int, default=8765, help="web UI port (default 8765)")
     args = ap.parse_args()
 
     if args.setup or args.question == ["setup"]:
         run_setup()
+        return
+
+    if args.web:
+        run_web(args.port)
         return
 
     if not CONFIG_PATH.exists():

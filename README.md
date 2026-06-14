@@ -87,6 +87,22 @@ The picker: `↑/↓` move, `space` toggle, `a` all, `n` none, `enter` confirm,
 `q` cancel. If your terminal can't run curses (or output is piped), it falls
 back to a numbered prompt automatically.
 
+## Web UI (optional)
+
+Prefer a browser over the terminal? quorum ships a local web UI: tick the panel
+models, pick a judge, type your question, and watch each answer stream in live
+followed by the verdict.
+
+```bash
+pip install -r requirements-web.txt   # one-time; the CLI itself stays dependency-free
+quorum --web                          # opens http://127.0.0.1:8765 in your browser
+quorum --web --port 9000              # custom port
+```
+
+It binds to `127.0.0.1` only (localhost) — it runs with your keys, so it is not
+exposed to the network. The CLI has zero dependencies; these extras are needed
+only for `--web`.
+
 ## Exit codes
 
 `0` all models answered · `1` some failed (judged without them; names + reasons

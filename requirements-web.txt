@@ -1,0 +1,4 @@
+# Optional — only needed for the web UI (`quorum --web`). The CLI itself has
+# zero dependencies.
+fastapi
+uvicorn[standard]
