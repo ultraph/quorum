@@ -159,8 +159,15 @@ def _find_bin(name: str, explicit: str = "") -> str:
     return str(cands[-1]) if cands else name
 
 
+def _bin_ok(binp: str) -> bool:
+    return bool(shutil.which(binp)) or os.path.exists(binp)
+
+
 def _cli_claude(m: Model, prompt: str) -> str:
     binp = _find_bin("claude", m.cli_bin)
+    if not _bin_ok(binp):
+        raise RuntimeError("claude CLI not found — install it and log in "
+                           "(run `claude`, then /login)")
     p = subprocess.run([binp, "-p", "--model", m.model], input=prompt,
                        capture_output=True, text=True, timeout=420)
     if p.returncode != 0:
@@ -170,6 +177,8 @@ def _cli_claude(m: Model, prompt: str) -> str:
 
 def _cli_codex(m: Model, prompt: str) -> str:
     binp = _find_bin("codex", m.cli_bin)
+    if not _bin_ok(binp):
+        raise RuntimeError("codex CLI not found — install it and log in (`codex login`)")
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "last.txt"
         p = subprocess.run(
@@ -332,6 +341,32 @@ PROVIDERS_META = {
 }
 
 
+CLI_INFO = {
+    "anthropic": {"bin": "claude", "creds": "~/.claude/.credentials.json",
+                  "login": "run `claude`, then /login"},
+    "openai":    {"bin": "codex", "creds": "~/.codex/auth.json",
+                  "login": "run `codex login`"},
+}
+
+
+def _check_cli(provider: str) -> None:
+    """Tell the user if the chosen CLI is missing or not logged in."""
+    info = CLI_INFO.get(provider)
+    if not info:
+        return
+    binp = _find_bin(info["bin"])
+    installed = _bin_ok(binp)
+    logged_in = Path(os.path.expanduser(info["creds"])).exists()
+    if installed and logged_in:
+        print(f"{GRN}  ✓ {info['bin']} is installed and logged in.{RST}")
+    elif not installed:
+        print(f"{YEL}  ! {info['bin']} CLI not found. Install it, then {info['login']} "
+              f"— required before quorum can use this model.{RST}")
+    else:
+        print(f"{YEL}  ! {info['bin']} is installed but not logged in. "
+              f"{info['login'].capitalize()} before using quorum.{RST}")
+
+
 def _ask(prompt: str, default: str = "") -> str:
     s = input(f"{prompt}{f' [{default}]' if default else ''}: ").strip()
     return s or default
@@ -364,6 +399,8 @@ def run_setup() -> None:
             print(f"  Auth: [1] API key   [2] Local CLI login "
                   f"({meta['cli']} — uses your subscription/login)")
             auth = "cli" if _ask("  Choose 1 or 2", "1") == "2" else "api"
+            if auth == "cli":
+                _check_cli(prov)
         name = meta["default_name"]  # auto — one provider, one fixed label
         model = _ask("  Model id", meta["default_model"])
         e = {"name": name, "provider": prov, "model": model, "auth": auth}
