@@ -92,7 +92,11 @@ INDEX_HTML = r"""<!doctype html>
          font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
   header { padding:18px 24px; border-bottom:1px solid var(--line);
            display:flex; align-items:center; gap:16px; }
-  header h1 { margin:0; font-size:20px; } header span { color:var(--dim); font-size:13px; }
+  header h1 { margin:0; font-size:20px; font-weight:700;
+    background:linear-gradient(90deg,var(--acc),var(--judge));
+    -webkit-background-clip:text; background-clip:text;
+    -webkit-text-fill-color:transparent; color:transparent; }
+  header span { color:var(--dim); font-size:13px; }
   .theme { background:var(--inbg); color:var(--txt); border:1px solid var(--line);
            border-radius:8px; padding:6px 10px; font-size:16px; font-weight:400;
            line-height:1; cursor:pointer; }
@@ -106,13 +110,19 @@ INDEX_HTML = r"""<!doctype html>
              font:inherit; }
   .models { display:flex; flex-wrap:wrap; gap:10px; margin:6px 0 14px; }
   .chk { display:flex; align-items:center; gap:7px; background:var(--inbg); border:1px solid var(--line);
-         padding:7px 11px; border-radius:20px; cursor:pointer; font-size:14px; }
+         padding:7px 11px; border-radius:20px; cursor:pointer; font-size:14px;
+         transition:border-color .15s ease, background .15s ease; }
+  .chk:hover { border-color:var(--acc); }
   .chk input { accent-color:var(--acc); }
+  .dot { width:9px; height:9px; border-radius:50%; flex:none; display:inline-block; }
   .row { display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
   select { background:var(--inbg); color:var(--txt); border:1px solid var(--line);
            border-radius:8px; padding:7px 10px; font:inherit; }
   button { background:var(--acc); color:var(--btntxt); border:0; border-radius:8px; padding:10px 20px;
-           font:inherit; font-weight:600; cursor:pointer; }
+           font:inherit; font-weight:600; cursor:pointer;
+           transition:transform .1s ease, filter .15s ease, opacity .15s ease; }
+  button:hover:not(:disabled) { transform:translateY(-1px); filter:brightness(1.08); }
+  button:active:not(:disabled) { transform:translateY(0); }
   button:disabled { opacity:.5; cursor:default; }
   .res h3 { margin:0 0 4px; font-size:15px; }
   .res .meta { color:var(--dim); font-size:12px; margin-bottom:8px; }
@@ -123,8 +133,10 @@ INDEX_HTML = r"""<!doctype html>
   details.card > summary { padding:14px 16px; cursor:pointer; list-style:none;
     display:flex; align-items:center; gap:10px; }
   details.card > summary::-webkit-details-marker { display:none; }
-  details.card > summary::before { content:'▶'; color:var(--dim); font-size:10px; }
-  details.card[open] > summary::before { content:'▼'; }
+  details.card > summary::before { content:'▶'; color:var(--dim); font-size:10px;
+    transition:transform .2s ease; }
+  details.card[open] > summary::before { transform:rotate(90deg); }
+  details.card > summary { transition:background .15s ease; }
   details.card > summary:hover { background:var(--hover); }
   details.card > summary .name { font-weight:600; font-size:15px; }
   details.card > summary .meta { margin-left:auto; margin-bottom:0; }
@@ -146,6 +158,35 @@ INDEX_HTML = r"""<!doctype html>
   .md blockquote { margin:0 0 10px; padding:2px 12px; border-left:3px solid var(--line); color:var(--dim); }
   .md a { color:var(--acc); } .md strong { color:var(--strong); }
   .md hr { border:0; border-top:1px solid var(--line); margin:12px 0; }
+
+  /* --- liveliness: motion, skeletons, status --- */
+  @keyframes cardIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
+  @keyframes fadeIn { from { opacity:0; } to { opacity:1; } }
+  @keyframes shimmer { from { background-position:-450px 0; } to { background-position:450px 0; } }
+  @keyframes blink { 0%,100% { opacity:1; } 50% { opacity:.3; } }
+  @keyframes ellipsis { 0% { content:''; } 25% { content:'·'; } 50% { content:'··'; } 75%,100% { content:'···'; } }
+  @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
+
+  .res { animation:cardIn .35s ease both; transition:box-shadow .2s ease, border-color .2s ease; }
+  .res:hover { box-shadow:0 4px 18px rgba(0,0,0,.16); }
+  details.card[open] > .md, details.card[open] > pre { animation:fadeIn .25s ease both; }
+  summary .dot { margin-right:2px; }
+
+  .pending .pendrow { display:flex; align-items:center; gap:10px; padding:14px 16px; }
+  .pending .name { font-weight:600; font-size:15px; }
+  .pending .timer { margin-left:auto; font-variant-numeric:tabular-nums; }
+  .pulse { animation:blink 1.2s ease-in-out infinite; }
+  .dots::after { content:''; animation:ellipsis 1.3s steps(1,end) infinite; }
+  .shimmer { height:9px; border-radius:5px; margin:7px 16px;
+    background:linear-gradient(90deg, var(--inbg) 25%, var(--hover) 37%, var(--inbg) 63%);
+    background-size:900px 100%; animation:shimmer 1.4s linear infinite; }
+  .shimmer.s2 { width:82%; } .shimmer.s3 { width:55%; margin-bottom:16px; }
+
+  .banner { display:inline-flex; align-items:center; gap:7px; padding:4px 12px; border-radius:20px;
+    font-size:13px; font-weight:600; border:1px solid var(--line); }
+  .banner.ok { color:var(--ok); border-color:var(--ok); }
+  .banner.warn { color:var(--judge); border-color:var(--judge); }
+  .banner.err { color:var(--err); border-color:var(--err); }
 </style>
 <script>
   // set theme before first paint to avoid a flash of the wrong colors
@@ -183,8 +224,9 @@ async function loadModels() {
   d.panel.forEach(m => {
     const id='m_'+m.name;
     const el=document.createElement('label'); el.className='chk';
-    el.innerHTML=`<input type="checkbox" id="${id}" ${m.enabled?'checked':''}> ${m.name}
-                  <span style="color:var(--dim);font-size:12px">${m.provider}·${m.auth}</span>`;
+    el.innerHTML=`<input type="checkbox" id="${id}" ${m.enabled?'checked':''}>
+                  <span class="dot" style="background:${providerColor(m.provider)}"></span> ${esc(m.name)}
+                  <span style="color:var(--dim);font-size:12px">${esc(m.provider)}·${esc(m.auth)}</span>`;
     box.appendChild(el);
   });
   const js=document.getElementById('judge');
@@ -196,6 +238,11 @@ function selectedPanel(){ return MODELS.filter(m=>document.getElementById('m_'+m
 
 function card(html, cls){ const d=document.createElement('div'); d.className='card res '+(cls||''); d.innerHTML=html; return d; }
 function esc(s){ return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+// per-provider accent colors (fall back to the theme accent)
+const PCOLOR={anthropic:'#d97757',openai:'#10a37f',gemini:'#4285f4',deepseek:'#4d6bfe',
+              mistral:'#ff7000',groq:'#f55036',xai:'#8b5cf6'};
+function providerColor(p){ return PCOLOR[(p||'').toLowerCase()] || 'var(--acc)'; }
 
 // Tiny self-contained Markdown → HTML (no external deps). Text is HTML-escaped
 // first, then only our own tags are added, so model output can't inject HTML.
@@ -245,13 +292,31 @@ async function ask(){
   const status=document.getElementById('status');
   if(!q){ status.textContent='Enter a question.'; return; }
   if(!panel.length){ status.textContent='Pick at least one model.'; return; }
-  const btn=document.getElementById('ask'); btn.disabled=true; status.textContent='Asking '+panel.length+' model(s)…';
+  const btn=document.getElementById('ask'); btn.disabled=true;
+  status.className='foot'; status.textContent='Asking '+panel.length+' model(s)…';
 
   let judgeCard=null;
   if(judge){   // reserve the verdict slot at the top up front so nothing jumps later
-    judgeCard=card(`<h3>Judge — ${esc(judge)}</h3><pre class="spin">waiting for panel…</pre>`,'judge');
+    judgeCard=card(`<h3>Judge — ${esc(judge)}</h3><pre class="spin">waiting for panel<span class="dots"></span></pre>`,'judge');
     out.appendChild(judgeCard);
   }
+
+  // skeleton placeholder + live timer for each model while it thinks
+  const pending={};
+  panel.forEach(name=>{
+    const m=MODELS.find(x=>x.name===name); const col=providerColor(m&&m.provider);
+    const el=document.createElement('div'); el.className='card res pending';
+    el.style.borderLeft='3px solid '+col;
+    el.innerHTML=`<div class="pendrow"><span class="dot pulse" style="background:${col}"></span>`+
+      `<span class="name">${esc(name)}</span>`+
+      `<span class="dots" style="color:var(--dim);font-size:13px">thinking</span>`+
+      `<span class="timer meta">0.0s</span></div>`+
+      `<div class="shimmer"></div><div class="shimmer s2"></div><div class="shimmer s3"></div>`;
+    out.appendChild(el); pending[name]={el, t0:performance.now()};
+  });
+  const tick=setInterval(()=>{ const now=performance.now();
+    for(const n in pending) pending[n].el.querySelector('.timer').textContent=((now-pending[n].t0)/1000).toFixed(1)+'s'; }, 100);
+  let okN=0, errN=0;
 
   const resp=await fetch('/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({question:q,panel:panel,judge:judge||null,use_judge:!!judge})});
@@ -265,30 +330,41 @@ async function ask(){
       if(!line.startsWith('data: ')) continue;
       const o=JSON.parse(line.slice(6));
       if(o.type==='model'){
+        o.error ? errN++ : okN++;
+        const col=providerColor(o.provider);
         const body = o.error ? `<pre class="err">ERROR: ${esc(o.error)}</pre>`
                              : `<div class="md">${mdToHtml(o.answer)}</div>`;
         const d=document.createElement('details'); d.className='card res';
+        d.style.borderLeft='3px solid '+col;
         if(o.error) d.open=true;                        // keep errors visible
-        d.innerHTML=`<summary><span class="name">${o.name} `+
+        d.innerHTML=`<summary><span class="dot" style="background:${col}"></span>`+
+          `<span class="name">${esc(o.name)} `+
           `<span class="${o.error?'err':'ok'}">${o.error?'✗':'✓'}</span></span>`+
-          `<span class="meta">${o.provider}/${o.model} · ${o.seconds}s</span></summary>${body}`;
-        out.appendChild(d);
+          `<span class="meta">${esc(o.provider)}/${esc(o.model)} · ${o.seconds}s</span></summary>${body}`;
+        const ph=pending[o.name];                       // swap the skeleton in place
+        if(ph){ ph.el.replaceWith(d); delete pending[o.name]; } else out.appendChild(d);
       } else if(o.type==='judge_start'){
         if(!judgeCard){   // fallback: judge wasn't pre-reserved
           judgeCard=card(`<h3>Judge — ${esc(o.name)}</h3><pre class="spin"></pre>`,'judge');
           out.insertBefore(judgeCard, out.firstChild);
         }
-        const p=judgeCard.querySelector('pre'); if(p) p.textContent='synthesizing…';
+        const p=judgeCard.querySelector('pre'); if(p) p.innerHTML='synthesizing<span class="dots"></span>';
       } else if(o.type==='judge'){
         if(judgeCard) judgeCard.querySelector('pre').outerHTML=`<div class="md">${mdToHtml(o.text)}</div>`;
-      } else if(o.type==='error'){ status.textContent=o.message; }
+      } else if(o.type==='error'){ status.className='foot'; status.innerHTML=`<span class="banner err">✗ ${esc(o.message)}</span>`; }
       else if(o.type==='done'){
-        status.textContent='Done.';
+        clearInterval(tick);
+        const total=okN+errN;
+        let cls='ok', icon='✓', txt=`all ${total} answered`;
+        if(okN===0){ cls='err'; icon='✗'; txt=`all ${total} failed`; }
+        else if(errN){ cls='warn'; icon='⚠'; txt=`${okN}/${total} answered · ${errN} failed`; }
+        status.innerHTML=`<span class="banner ${cls}">${icon} ${txt}</span>`;
         const p=judgeCard && judgeCard.querySelector('pre.spin');   // judge never ran (panel empty/all failed)
         if(p) p.outerHTML=`<pre class="meta">No verdict — the panel produced no answers to judge.</pre>`;
       }
     }
   }
+  clearInterval(tick);   // safety: stop timers if the stream ends without a 'done'
   btn.disabled=false;
 }
 document.getElementById('ask').addEventListener('click',ask);
