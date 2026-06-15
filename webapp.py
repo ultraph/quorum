@@ -49,6 +49,19 @@ async def api_ask(req: Request) -> StreamingResponse:
     judge_name = body.get("judge")
     use_judge = bool(body.get("use_judge", True))
 
+    # attached files (read client-side as text) get appended to the question, so
+    # both the panel and the judge analyze them.
+    file_parts = []
+    for a in (body.get("attachments") or []):
+        text = a.get("text") or ""
+        if not text.strip():
+            continue
+        fname = (a.get("name") or "file").strip() or "file"
+        file_parts.append(f"=== ATTACHED FILE: {fname} ===\n{text}")
+    files_block = "\n\n".join(file_parts)
+    full_question = (((question or "Analyze the attached file(s).") + "\n\n" + files_block)
+                     if files_block else question)
+
     cfg = q.load_config()
     panel = [m for m in cfg.panel if m.name in names]
     judge = next((m for m in cfg.panel if m.name == judge_name), None) if judge_name else None
@@ -66,14 +79,14 @@ async def api_ask(req: Request) -> StreamingResponse:
         extras.append(em)
 
     async def gen():
-        if not question:
-            yield _sse({"type": "error", "message": "Empty question."}); return
+        if not full_question.strip():
+            yield _sse({"type": "error", "message": "Enter a question or attach a file."}); return
         if not panel and not extras:
             yield _sse({"type": "error", "message": "Pick a model or add an external answer."}); return
         loop = asyncio.get_event_loop()
         if panel:
             with ThreadPoolExecutor(max_workers=len(panel)) as ex:
-                futs = [loop.run_in_executor(ex, q.run_model, m, question) for m in panel]
+                futs = [loop.run_in_executor(ex, q.run_model, m, full_question) for m in panel]
                 for fut in asyncio.as_completed(futs):
                     m = await fut
                     yield _sse({"type": "model", "name": m.name, "provider": m.provider,
@@ -86,7 +99,7 @@ async def api_ask(req: Request) -> StreamingResponse:
         judge_panel = panel + extras
         if use_judge and judge is not None and any(not m.error for m in judge_panel):
             yield _sse({"type": "judge_start", "name": judge.name})
-            text = await loop.run_in_executor(None, q.run_judge, judge, question, judge_panel)
+            text = await loop.run_in_executor(None, q.run_judge, judge, full_question, judge_panel)
             yield _sse({"type": "judge", "name": judge.name, "text": text})
         yield _sse({"type": "done"})
 
@@ -227,6 +240,13 @@ INDEX_HTML = r"""<!doctype html>
   .exedit { margin-left:auto; background:none; border:0; color:var(--acc); cursor:pointer;
             font-size:13px; padding:2px 6px; }
   .exedit:hover:not(:disabled) { background:none; filter:none; transform:none; text-decoration:underline; }
+  .attachbar { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-top:8px; }
+  .files { display:flex; flex-wrap:wrap; gap:8px; }
+  .fchip { display:inline-flex; align-items:center; gap:6px; background:var(--inbg);
+           border:1px solid var(--line); border-radius:16px; padding:4px 6px 4px 10px; font-size:13px; }
+  .fchip .fdel { background:none; border:0; color:var(--dim); cursor:pointer; font-size:13px;
+                 padding:0 4px; line-height:1; }
+  .fchip .fdel:hover:not(:disabled) { background:none; filter:none; transform:none; color:var(--err); }
 </style>
 <script>
   // set theme before first paint to avoid a flash of the wrong colors
@@ -245,6 +265,12 @@ INDEX_HTML = r"""<!doctype html>
   <div class="card">
     <label>Question</label>
     <textarea id="q" placeholder="Ask anything…"></textarea>
+    <div class="attachbar">
+      <input type="file" id="file" multiple style="display:none"
+             accept=".md,.markdown,.txt,.text,.csv,.tsv,.json,.log,.yaml,.yml,.xml,.html,.htm,.rst,.ini,.toml,.py,.js,.ts,.sh,.c,.cpp,.h,.java,.go,.rs">
+      <button type="button" id="attachBtn" class="ghost">📎 Attach file</button>
+      <div id="files" class="files"></div>
+    </div>
     <label style="margin-top:14px">Panel</label>
     <div class="models" id="models"></div>
     <label style="margin-top:14px">External answers <span style="font-weight:400">— paste opinions from other chats (optional)</span></label>
@@ -315,6 +341,26 @@ function collectExtras(){
   })).filter(e=>e.text);
 }
 
+let ATTACH=[];   // {name, size, text} — files read client-side as text
+function fmtSize(n){ return n<1024 ? n+' B' : n<1048576 ? (n/1024).toFixed(1)+' KB' : (n/1048576).toFixed(1)+' MB'; }
+function renderFiles(){
+  const box=document.getElementById('files'); box.innerHTML='';
+  ATTACH.forEach((a,i)=>{
+    const chip=document.createElement('span'); chip.className='fchip';
+    chip.innerHTML=`📄 ${esc(a.name)} <span class="meta">${fmtSize(a.size)}</span>`+
+      `<button type="button" class="fdel" data-i="${i}" title="Remove">✕</button>`;
+    box.appendChild(chip);
+  });
+}
+async function onFiles(ev){
+  for(const f of ev.target.files){
+    try { ATTACH.push({name:f.name, size:f.size, text:await f.text()}); }
+    catch(e){ document.getElementById('status').textContent='Could not read '+f.name; }
+  }
+  ev.target.value='';   // let the same file be re-picked later
+  renderFiles();
+}
+
 function card(html, cls){ const d=document.createElement('div'); d.className='card res '+(cls||''); d.innerHTML=html; return d; }
 function esc(s){ return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 
@@ -367,14 +413,16 @@ async function ask(){
   const q=document.getElementById('q').value.trim();
   const panel=selectedPanel();
   const extra=collectExtras();
+  const attachments=ATTACH.map(a=>({name:a.name, text:a.text}));
   const judge=document.getElementById('judge').value;
   const out=document.getElementById('out'); out.innerHTML='';
   const status=document.getElementById('status');
-  if(!q){ status.textContent='Enter a question.'; return; }
+  if(!q && !attachments.length){ status.textContent='Enter a question or attach a file.'; return; }
   if(!panel.length && !extra.length){ status.textContent='Pick a model or add an external answer.'; return; }
   const btn=document.getElementById('ask'); btn.disabled=true;
   status.className='foot';
-  status.textContent='Asking '+panel.length+' model(s)'+(extra.length?' · '+extra.length+' pasted':'')+'…';
+  status.textContent='Asking '+panel.length+' model(s)'+(extra.length?' · '+extra.length+' pasted':'')
+    +(attachments.length?' · '+attachments.length+' file(s)':'')+'…';
 
   let judgeCard=null;
   if(judge){   // reserve the verdict slot at the top up front so nothing jumps later
@@ -400,7 +448,7 @@ async function ask(){
   let okN=0, errN=0;
 
   const resp=await fetch('/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({question:q,panel:panel,extra:extra,judge:judge||null,use_judge:!!judge})});
+    body:JSON.stringify({question:q,panel:panel,extra:extra,attachments:attachments,judge:judge||null,use_judge:!!judge})});
   const reader=resp.body.getReader(); const dec=new TextDecoder(); let buf='';
   while(true){
     const {value,done}=await reader.read(); if(done) break;
@@ -452,6 +500,11 @@ async function ask(){
 }
 document.getElementById('ask').addEventListener('click',ask);
 document.getElementById('addExtra').addEventListener('click',addExtraRow);
+document.getElementById('attachBtn').addEventListener('click',()=>document.getElementById('file').click());
+document.getElementById('file').addEventListener('change',onFiles);
+document.getElementById('files').addEventListener('click',ev=>{
+  if(ev.target.classList.contains('fdel')){ ATTACH.splice(+ev.target.dataset.i,1); renderFiles(); }
+});
 
 const themeBtn=document.getElementById('theme');
 function curTheme(){ return document.documentElement.getAttribute('data-theme')==='light' ? 'light' : 'dark'; }
