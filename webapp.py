@@ -230,14 +230,14 @@ async function ask(){
       const o=JSON.parse(line.slice(6));
       if(o.type==='model'){
         const body = o.error ? `<pre class="err">ERROR: ${esc(o.error)}</pre>`
-                             : `<pre>${esc(o.answer)}</pre>`;
+                             : `<div class="md">${mdToHtml(o.answer)}</div>`;
         out.appendChild(card(`<h3>${o.name} <span class="${o.error?'err':'ok'}">${o.error?'✗':'✓'}</span></h3>
           <div class="meta">${o.provider}/${o.model} · ${o.seconds}s</div>${body}`));
       } else if(o.type==='judge_start'){
         judgeCard=card(`<h3>Judge — ${o.name}</h3><pre class="spin">synthesizing…</pre>`,'judge');
         out.appendChild(judgeCard);
       } else if(o.type==='judge'){
-        if(judgeCard) judgeCard.querySelector('pre').outerHTML=`<pre>${esc(o.text)}</pre>`;
+        if(judgeCard) judgeCard.querySelector('pre').outerHTML=`<div class="md">${mdToHtml(o.text)}</div>`;
       } else if(o.type==='error'){ status.textContent=o.message; }
       else if(o.type==='done'){ status.textContent='Done.'; }
     }
