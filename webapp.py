@@ -249,7 +249,7 @@ async function ask(){
         out.appendChild(d);
       } else if(o.type==='judge_start'){
         judgeCard=card(`<h3>Judge — ${o.name}</h3><pre class="spin">synthesizing…</pre>`,'judge');
-        out.appendChild(judgeCard);
+        out.insertBefore(judgeCard, out.firstChild);   // judge verdict on top
       } else if(o.type==='judge'){
         if(judgeCard) judgeCard.querySelector('pre').outerHTML=`<div class="md">${mdToHtml(o.text)}</div>`;
       } else if(o.type==='error'){ status.textContent=o.message; }
