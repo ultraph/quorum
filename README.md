@@ -7,10 +7,12 @@ You choose who sits on the panel and who judges - with checkboxes or flags.
 Each model can be reached through its **official API** (your key) or through
 your **local CLI login** (`claude -p` / `codex exec`) - your choice, per model.
 
-- **Zero dependencies.** Pure Python standard library. No `pip install`.
+- **Zero dependencies.** The CLI is pure Python standard library. No `pip install`.
 - **Pick your panel.** Interactive checkboxes, or `--panel a,b,c` for scripts.
 - **Pick your judge.** Any model, or none.
 - **Providers:** Anthropic (Claude), OpenAI (GPT), Google (Gemini), DeepSeek.
+- **Optional web UI.** A local browser front-end (`--web`) with rendered
+  Markdown, light/dark themes, pasted outside opinions, and file attachments.
 
 ## Why
 
@@ -79,8 +81,8 @@ quorum "Is now a good time to rotate from alts into BTC?"   # interactive picker
 quorum --panel gpt,gemini,claude "..."                      # explicit panel
 quorum --judge claude --panel gpt,deepseek "..."            # choose the judge
 quorum --no-judge "..."                                     # raw answers only
-quorum -c strategy.py "find the weak spots"                 # attach a file
-cat log.txt | quorum "what's wrong here?"                   # question via stdin
+quorum -c strategy.py "find the weak spots"                 # attach a file as context
+cat error.log | quorum                                      # whole pipe becomes the question
 quorum --list                                               # show configured models
 quorum --save out.md "..."                                  # write a transcript
 ```
@@ -92,14 +94,30 @@ back to a numbered prompt automatically.
 ## Web UI (optional)
 
 Prefer a browser over the terminal? quorum ships a local web UI: tick the panel
-models, pick a judge, type your question, and watch each answer stream in live
-followed by the verdict.
+models, pick a judge, ask, and watch each answer stream in live with the
+judge's verdict synthesized on top.
 
 ```bash
 pip install -r requirements-web.txt   # one-time; the CLI itself stays dependency-free
 quorum --web                          # opens http://127.0.0.1:8765 in your browser
 quorum --web --port 9000              # custom port
 ```
+
+What the browser adds over the terminal:
+
+- **Rendered Markdown** — answers and the verdict display as formatted text
+  (headings, lists, code blocks), not raw `**`/`#`.
+- **Verdict on top, answers collapsed** — the judge's synthesis stays expanded
+  at the top; each model's answer is a collapsible card you open on demand.
+- **Live feedback** — a skeleton card with a running timer while each model
+  thinks, per-provider accent colors, and a final summary pill.
+- **Light & dark themes** — toggle in the header; your choice is remembered and
+  the system preference is the default.
+- **Paste an outside opinion** — drop in an answer from another chat (e.g. a
+  model you don't have configured); it joins the panel as a card and the judge
+  weighs it alongside the live models.
+- **Attach a file** — add a text file (`.md`, `.txt`, code, …) and the whole
+  panel and the judge analyze its contents.
 
 It binds to `127.0.0.1` only (localhost) — it runs with your keys, so it is not
 exposed to the network. The CLI has zero dependencies; these extras are needed
