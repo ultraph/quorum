@@ -219,6 +219,14 @@ INDEX_HTML = r"""<!doctype html>
                     border:1px solid var(--line); border-radius:6px; padding:8px; font:inherit; resize:vertical; }
   .exdel { background:none; border:0; color:var(--dim); cursor:pointer; font-size:15px; padding:2px 7px; }
   .exdel:hover:not(:disabled) { background:none; filter:none; transform:none; color:var(--err); }
+  .extra.accepted { flex-direction:row; align-items:center; padding:8px 10px; border-color:var(--ok); }
+  .extra.accepted .exrow, .extra.accepted .extext { display:none; }
+  .extra:not(.accepted) .exsum { display:none; }
+  .exsum { display:flex; align-items:center; gap:8px; width:100%; }
+  .exsum-label { font-size:14px; }
+  .exedit { margin-left:auto; background:none; border:0; color:var(--acc); cursor:pointer;
+            font-size:13px; padding:2px 6px; }
+  .exedit:hover:not(:disabled) { background:none; filter:none; transform:none; text-decoration:underline; }
 </style>
 <script>
   // set theme before first paint to avoid a flash of the wrong colors
@@ -275,12 +283,30 @@ function addExtraRow(){
   const wrap=document.createElement('div'); wrap.className='extra';
   wrap.innerHTML=`<div class="exrow">
       <input class="exname" placeholder="Source (e.g. Gemini Pro 3)">
+      <button type="button" class="exok ghost" title="Accept and collapse">✓ Accept</button>
       <button type="button" class="exdel" title="Remove">✕</button>
     </div>
-    <textarea class="extext" placeholder="Paste an answer from another chat to add it to the discussion…"></textarea>`;
-  wrap.querySelector('.exdel').addEventListener('click',()=>wrap.remove());
+    <textarea class="extext" placeholder="Paste an answer from another chat to add it to the discussion…"></textarea>
+    <div class="exsum"></div>`;
+  const textEl=()=>wrap.querySelector('.extext');
+  const accept=()=>{
+    const t=textEl().value.trim();
+    if(!t){ textEl().focus(); return; }            // nothing pasted yet
+    const name=(wrap.querySelector('.exname').value||'').trim()||'External';
+    wrap.querySelector('.exsum').innerHTML=
+      `<span class="exsum-label">📋 ${esc(name)} <span class="meta">· ${t.length} chars</span></span>`+
+      `<button type="button" class="exedit">edit</button>`+
+      `<button type="button" class="exdel" title="Remove">✕</button>`;
+    wrap.classList.add('accepted');
+  };
+  wrap.addEventListener('click',ev=>{                // one delegated handler for both states
+    const c=ev.target.classList;
+    if(c.contains('exdel')) wrap.remove();
+    else if(c.contains('exok')) accept();
+    else if(c.contains('exedit')){ wrap.classList.remove('accepted'); textEl().focus(); }
+  });
   document.getElementById('extras').appendChild(wrap);
-  wrap.querySelector('.extext').focus();
+  textEl().focus();
 }
 function collectExtras(){
   return [...document.querySelectorAll('#extras .extra')].map(w=>({
