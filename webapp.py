@@ -53,22 +53,40 @@ async def api_ask(req: Request) -> StreamingResponse:
     panel = [m for m in cfg.panel if m.name in names]
     judge = next((m for m in cfg.panel if m.name == judge_name), None) if judge_name else None
 
+    # pasted outside opinions become synthetic panelists: not called, but shown
+    # as cards and handed to the judge alongside the live models.
+    extras = []
+    for e in (body.get("extra") or []):
+        text = (e.get("text") or "").strip()
+        if not text:
+            continue
+        label = (e.get("name") or "external").strip() or "external"
+        em = q.Model(name=label, provider="external", model="pasted")
+        em.answer = text
+        extras.append(em)
+
     async def gen():
         if not question:
             yield _sse({"type": "error", "message": "Empty question."}); return
-        if not panel:
-            yield _sse({"type": "error", "message": "No panel models selected."}); return
+        if not panel and not extras:
+            yield _sse({"type": "error", "message": "Pick a model or add an external answer."}); return
         loop = asyncio.get_event_loop()
-        with ThreadPoolExecutor(max_workers=len(panel)) as ex:
-            futs = [loop.run_in_executor(ex, q.run_model, m, question) for m in panel]
-            for fut in asyncio.as_completed(futs):
-                m = await fut
-                yield _sse({"type": "model", "name": m.name, "provider": m.provider,
-                            "model": m.model, "seconds": round(m.seconds, 1),
-                            "answer": m.answer, "error": m.error})
-        if use_judge and judge is not None and any(not m.error for m in panel):
+        if panel:
+            with ThreadPoolExecutor(max_workers=len(panel)) as ex:
+                futs = [loop.run_in_executor(ex, q.run_model, m, question) for m in panel]
+                for fut in asyncio.as_completed(futs):
+                    m = await fut
+                    yield _sse({"type": "model", "name": m.name, "provider": m.provider,
+                                "model": m.model, "seconds": round(m.seconds, 1),
+                                "answer": m.answer, "error": m.error})
+        for m in extras:
+            yield _sse({"type": "model", "name": m.name, "provider": "external",
+                        "model": "pasted", "seconds": 0, "answer": m.answer,
+                        "error": "", "external": True})
+        judge_panel = panel + extras
+        if use_judge and judge is not None and any(not m.error for m in judge_panel):
             yield _sse({"type": "judge_start", "name": judge.name})
-            text = await loop.run_in_executor(None, q.run_judge, judge, question, panel)
+            text = await loop.run_in_executor(None, q.run_judge, judge, question, judge_panel)
             yield _sse({"type": "judge", "name": judge.name, "text": text})
         yield _sse({"type": "done"})
 
@@ -187,6 +205,20 @@ INDEX_HTML = r"""<!doctype html>
   .banner.ok { color:var(--ok); border-color:var(--ok); }
   .banner.warn { color:var(--judge); border-color:var(--judge); }
   .banner.err { color:var(--err); border-color:var(--err); }
+
+  /* external (pasted) answers input */
+  .ghost { background:var(--inbg); color:var(--txt); border:1px solid var(--line);
+           font-weight:500; padding:7px 12px; font-size:13px; }
+  .ghost:hover:not(:disabled) { background:var(--hover); filter:none; }
+  .extra { display:flex; flex-direction:column; gap:6px; border:1px solid var(--line);
+           border-radius:8px; padding:10px; margin-bottom:8px; background:var(--inbg); }
+  .extra .exrow { display:flex; gap:8px; align-items:center; }
+  .extra input { flex:1; background:var(--panel); color:var(--txt); border:1px solid var(--line);
+                 border-radius:6px; padding:6px 9px; font:inherit; font-size:13px; }
+  .extra textarea { min-height:70px; background:var(--panel); color:var(--txt);
+                    border:1px solid var(--line); border-radius:6px; padding:8px; font:inherit; resize:vertical; }
+  .exdel { background:none; border:0; color:var(--dim); cursor:pointer; font-size:15px; padding:2px 7px; }
+  .exdel:hover:not(:disabled) { background:none; filter:none; transform:none; color:var(--err); }
 </style>
 <script>
   // set theme before first paint to avoid a flash of the wrong colors
@@ -207,7 +239,10 @@ INDEX_HTML = r"""<!doctype html>
     <textarea id="q" placeholder="Ask anything…"></textarea>
     <label style="margin-top:14px">Panel</label>
     <div class="models" id="models"></div>
-    <div class="row">
+    <label style="margin-top:14px">External answers <span style="font-weight:400">— paste opinions from other chats (optional)</span></label>
+    <div id="extras"></div>
+    <button type="button" id="addExtra" class="ghost">+ Add a pasted answer</button>
+    <div class="row" style="margin-top:14px">
       <div><label>Judge</label><select id="judge"></select></div>
       <div style="margin-left:auto"><button id="ask">Ask</button></div>
     </div>
@@ -235,6 +270,24 @@ async function loadModels() {
   if (d.judge) js.value=d.judge;
 }
 function selectedPanel(){ return MODELS.filter(m=>document.getElementById('m_'+m.name).checked).map(m=>m.name); }
+
+function addExtraRow(){
+  const wrap=document.createElement('div'); wrap.className='extra';
+  wrap.innerHTML=`<div class="exrow">
+      <input class="exname" placeholder="Source (e.g. Gemini Pro 3)">
+      <button type="button" class="exdel" title="Remove">✕</button>
+    </div>
+    <textarea class="extext" placeholder="Paste an answer from another chat to add it to the discussion…"></textarea>`;
+  wrap.querySelector('.exdel').addEventListener('click',()=>wrap.remove());
+  document.getElementById('extras').appendChild(wrap);
+  wrap.querySelector('.extext').focus();
+}
+function collectExtras(){
+  return [...document.querySelectorAll('#extras .extra')].map(w=>({
+    name:(w.querySelector('.exname').value||'').trim(),
+    text:(w.querySelector('.extext').value||'').trim(),
+  })).filter(e=>e.text);
+}
 
 function card(html, cls){ const d=document.createElement('div'); d.className='card res '+(cls||''); d.innerHTML=html; return d; }
 function esc(s){ return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
@@ -287,13 +340,15 @@ function mdToHtml(src){
 async function ask(){
   const q=document.getElementById('q').value.trim();
   const panel=selectedPanel();
+  const extra=collectExtras();
   const judge=document.getElementById('judge').value;
   const out=document.getElementById('out'); out.innerHTML='';
   const status=document.getElementById('status');
   if(!q){ status.textContent='Enter a question.'; return; }
-  if(!panel.length){ status.textContent='Pick at least one model.'; return; }
+  if(!panel.length && !extra.length){ status.textContent='Pick a model or add an external answer.'; return; }
   const btn=document.getElementById('ask'); btn.disabled=true;
-  status.className='foot'; status.textContent='Asking '+panel.length+' model(s)…';
+  status.className='foot';
+  status.textContent='Asking '+panel.length+' model(s)'+(extra.length?' · '+extra.length+' pasted':'')+'…';
 
   let judgeCard=null;
   if(judge){   // reserve the verdict slot at the top up front so nothing jumps later
@@ -319,7 +374,7 @@ async function ask(){
   let okN=0, errN=0;
 
   const resp=await fetch('/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({question:q,panel:panel,judge:judge||null,use_judge:!!judge})});
+    body:JSON.stringify({question:q,panel:panel,extra:extra,judge:judge||null,use_judge:!!judge})});
   const reader=resp.body.getReader(); const dec=new TextDecoder(); let buf='';
   while(true){
     const {value,done}=await reader.read(); if(done) break;
@@ -331,16 +386,18 @@ async function ask(){
       const o=JSON.parse(line.slice(6));
       if(o.type==='model'){
         o.error ? errN++ : okN++;
-        const col=providerColor(o.provider);
+        const ext=!!o.external;
+        const col=ext ? '#8b8f9a' : providerColor(o.provider);
         const body = o.error ? `<pre class="err">ERROR: ${esc(o.error)}</pre>`
                              : `<div class="md">${mdToHtml(o.answer)}</div>`;
+        const mark = ext ? '📋' : `<span class="${o.error?'err':'ok'}">${o.error?'✗':'✓'}</span>`;
+        const meta = ext ? 'pasted answer' : `${esc(o.provider)}/${esc(o.model)} · ${o.seconds}s`;
         const d=document.createElement('details'); d.className='card res';
         d.style.borderLeft='3px solid '+col;
         if(o.error) d.open=true;                        // keep errors visible
         d.innerHTML=`<summary><span class="dot" style="background:${col}"></span>`+
-          `<span class="name">${esc(o.name)} `+
-          `<span class="${o.error?'err':'ok'}">${o.error?'✗':'✓'}</span></span>`+
-          `<span class="meta">${esc(o.provider)}/${esc(o.model)} · ${o.seconds}s</span></summary>${body}`;
+          `<span class="name">${esc(o.name)} ${mark}</span>`+
+          `<span class="meta">${meta}</span></summary>${body}`;
         const ph=pending[o.name];                       // swap the skeleton in place
         if(ph){ ph.el.replaceWith(d); delete pending[o.name]; } else out.appendChild(d);
       } else if(o.type==='judge_start'){
@@ -368,6 +425,7 @@ async function ask(){
   btn.disabled=false;
 }
 document.getElementById('ask').addEventListener('click',ask);
+document.getElementById('addExtra').addEventListener('click',addExtraRow);
 
 const themeBtn=document.getElementById('theme');
 function curTheme(){ return document.documentElement.getAttribute('data-theme')==='light' ? 'light' : 'dark'; }
