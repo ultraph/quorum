@@ -39,7 +39,9 @@ Running `quorum` with no config offers to launch the wizard automatically.
 
 ## Requirements
 
-- **Python 3.11+** (for the built-in `tomllib`). No other dependencies.
+- **Python 3.8+**. No other dependencies. (On 3.11+ the config is parsed by the
+  built-in `tomllib`; on older versions like Ubuntu 22.04 / Mint 21's Python 3.10,
+  a small bundled stdlib-only TOML reader is used automatically.)
 - **`auth = "api"`** - just an API key for that provider. No CLI needed.
 - **`auth = "cli"`** - the provider's CLI must be installed **and logged in**:
   - **Anthropic → `claude`** (Claude Code) - log in: run `claude`, then `/login`.

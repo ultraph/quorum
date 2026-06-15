@@ -25,7 +25,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import tomllib
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -84,12 +83,106 @@ def _model_from_table(t: dict) -> Model:
     )
 
 
+# --- TOML loading -----------------------------------------------------------
+# Python 3.11+ ships tomllib. On older interpreters (e.g. Ubuntu 22.04 / Mint 21
+# = Python 3.10) it's absent, so fall back to a tiny reader that handles the flat
+# subset quorum writes and documents. Keeps the "stdlib only, zero deps" promise.
+
+try:
+    import tomllib  # Python 3.11+
+
+    def _load_toml(f) -> dict:
+        return tomllib.load(f)
+except ModuleNotFoundError:
+    def _load_toml(f) -> dict:
+        return _mini_toml(f.read().decode("utf-8"))
+
+
+def _strip_inline_comment(s: str) -> str:
+    """Drop a trailing `# comment`, but not a `#` inside a quoted string."""
+    out, quote, esc = [], "", False
+    for ch in s:
+        if esc:                       # previous char was a backslash (basic str)
+            out.append(ch); esc = False; continue
+        if quote == '"' and ch == "\\":
+            out.append(ch); esc = True; continue
+        if quote:
+            out.append(ch)
+            if ch == quote:
+                quote = ""
+        elif ch in ('"', "'"):
+            quote = ch; out.append(ch)
+        elif ch == "#":
+            break
+        else:
+            out.append(ch)
+    return "".join(out).strip()
+
+
+def _mini_value(s: str, lineno: int):
+    s = _strip_inline_comment(s)
+    if not s:
+        raise ValueError(f"line {lineno}: empty value")
+    if s[0] == '"':                   # basic string — JSON escapes match TOML's
+        try:
+            return json.loads(s)
+        except json.JSONDecodeError:
+            raise ValueError(f"line {lineno}: bad string: {s!r}")
+    if s[0] == "'":                   # literal string — no escapes
+        if len(s) < 2 or s[-1] != "'":
+            raise ValueError(f"line {lineno}: unterminated string: {s!r}")
+        return s[1:-1]
+    if s == "true":
+        return True
+    if s == "false":
+        return False
+    try:
+        return int(s)
+    except ValueError:
+        raise ValueError(f"line {lineno}: cannot parse value: {s!r}")
+
+
+def _mini_toml(text: str) -> dict:
+    """Minimal TOML reader for quorum's own flat config shape.
+
+    Supports exactly what quorum writes/documents: [table], [[array.of.tables]],
+    key = "string" | 'literal' | true | false | int, full-line and inline `#`
+    comments, and blank lines. Not a general TOML parser — used only as a
+    fallback when stdlib tomllib is unavailable (Python < 3.11).
+    """
+    root: dict = {}
+    cur: dict = root
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[[") and line.endswith("]]"):
+            key = line[2:-2].strip()
+            arr = root.setdefault(key, [])
+            if not isinstance(arr, list):
+                raise ValueError(f"line {lineno}: {key!r} is not an array of tables")
+            cur = {}
+            arr.append(cur)
+        elif line.startswith("[") and line.endswith("]"):
+            key = line[1:-1].strip()
+            tbl = root.setdefault(key, {})
+            if not isinstance(tbl, dict):
+                raise ValueError(f"line {lineno}: {key!r} is not a table")
+            cur = tbl
+        elif "=" in line:
+            k, _, v = line.partition("=")
+            cur[k.strip()] = _mini_value(v, lineno)
+        else:
+            raise ValueError(f"line {lineno}: expected 'key = value', got {line!r}")
+    return root
+
+
 def load_config() -> Config:
     if not CONFIG_PATH.exists():
         sys.exit(f"{RED}No config:{RST} {CONFIG_PATH}\n"
                  f"Copy config.example.toml there and fill it in.")
     with open(CONFIG_PATH, "rb") as f:
-        raw = tomllib.load(f)
+        raw = _load_toml(f)
     panel = [_model_from_table(t) for t in raw.get("panel", [])]
     jt = raw.get("judge", {})
     judge_enabled = jt.get("enabled", True)
