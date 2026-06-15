@@ -91,7 +91,9 @@ async def api_ask(req: Request) -> StreamingResponse:
                     m = await fut
                     yield _sse({"type": "model", "name": m.name, "provider": m.provider,
                                 "model": m.model, "seconds": round(m.seconds, 1),
-                                "answer": m.answer, "error": m.error})
+                                "answer": m.answer, "error": m.error,
+                                "tokens_in": m.tokens_in, "tokens_out": m.tokens_out,
+                                "tokens_est": m.tokens_est})
         for m in extras:
             yield _sse({"type": "model", "name": m.name, "provider": "external",
                         "model": "pasted", "seconds": 0, "answer": m.answer,
@@ -100,7 +102,9 @@ async def api_ask(req: Request) -> StreamingResponse:
         if use_judge and judge is not None and any(not m.error for m in judge_panel):
             yield _sse({"type": "judge_start", "name": judge.name})
             text = await loop.run_in_executor(None, q.run_judge, judge, full_question, judge_panel)
-            yield _sse({"type": "judge", "name": judge.name, "text": text})
+            yield _sse({"type": "judge", "name": judge.name, "text": text,
+                        "tokens_in": judge.tokens_in, "tokens_out": judge.tokens_out,
+                        "tokens_est": judge.tokens_est})
         yield _sse({"type": "done"})
 
     return StreamingResponse(gen(), media_type="text/event-stream")
@@ -368,6 +372,11 @@ function esc(s){ return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>'
 const PCOLOR={anthropic:'#d97757',openai:'#10a37f',gemini:'#4285f4',deepseek:'#4d6bfe',
               mistral:'#ff7000',groq:'#f55036',xai:'#8b5cf6'};
 function providerColor(p){ return PCOLOR[(p||'').toLowerCase()] || 'var(--acc)'; }
+function fmtTok(o){
+  const ti=o.tokens_in||0, to=o.tokens_out||0;
+  if(!ti && !to) return '';
+  return ` · ${o.tokens_est?'~':''}${ti.toLocaleString()}→${to.toLocaleString()} tok`;
+}
 
 // Tiny self-contained Markdown → HTML (no external deps). Text is HTML-escaped
 // first, then only our own tags are added, so model output can't inject HTML.
@@ -445,7 +454,7 @@ async function ask(){
   });
   const tick=setInterval(()=>{ const now=performance.now();
     for(const n in pending) pending[n].el.querySelector('.timer').textContent=((now-pending[n].t0)/1000).toFixed(1)+'s'; }, 100);
-  let okN=0, errN=0;
+  let okN=0, errN=0, tokIn=0, tokOut=0;
 
   const resp=await fetch('/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({question:q,panel:panel,extra:extra,attachments:attachments,judge:judge||null,use_judge:!!judge})});
@@ -460,12 +469,13 @@ async function ask(){
       const o=JSON.parse(line.slice(6));
       if(o.type==='model'){
         o.error ? errN++ : okN++;
+        tokIn+=o.tokens_in||0; tokOut+=o.tokens_out||0;
         const ext=!!o.external;
         const col=ext ? '#8b8f9a' : providerColor(o.provider);
         const body = o.error ? `<pre class="err">ERROR: ${esc(o.error)}</pre>`
                              : `<div class="md">${mdToHtml(o.answer)}</div>`;
         const mark = ext ? '📋' : `<span class="${o.error?'err':'ok'}">${o.error?'✗':'✓'}</span>`;
-        const meta = ext ? 'pasted answer' : `${esc(o.provider)}/${esc(o.model)} · ${o.seconds}s`;
+        const meta = ext ? 'pasted answer' : `${esc(o.provider)}/${esc(o.model)} · ${o.seconds}s${fmtTok(o)}`;
         const d=document.createElement('details'); d.className='card res';
         d.style.borderLeft='3px solid '+col;
         if(o.error) d.open=true;                        // keep errors visible
@@ -481,7 +491,12 @@ async function ask(){
         }
         const p=judgeCard.querySelector('pre'); if(p) p.innerHTML='synthesizing<span class="dots"></span>';
       } else if(o.type==='judge'){
-        if(judgeCard) judgeCard.querySelector('pre').outerHTML=`<div class="md">${mdToHtml(o.text)}</div>`;
+        if(judgeCard){
+          judgeCard.querySelector('pre').outerHTML=`<div class="md">${mdToHtml(o.text)}</div>`;
+          const b=fmtTok(o); const h=judgeCard.querySelector('h3');
+          if(b && h) h.innerHTML+=`<span class="meta">${b}</span>`;
+        }
+        tokIn+=o.tokens_in||0; tokOut+=o.tokens_out||0;
       } else if(o.type==='error'){ status.className='foot'; status.innerHTML=`<span class="banner err">✗ ${esc(o.message)}</span>`; }
       else if(o.type==='done'){
         clearInterval(tick);
@@ -489,7 +504,9 @@ async function ask(){
         let cls='ok', icon='✓', txt=`all ${total} answered`;
         if(okN===0){ cls='err'; icon='✗'; txt=`all ${total} failed`; }
         else if(errN){ cls='warn'; icon='⚠'; txt=`${okN}/${total} answered · ${errN} failed`; }
-        status.innerHTML=`<span class="banner ${cls}">${icon} ${txt}</span>`;
+        const tk=(tokIn||tokOut) ? ` <span class="meta">· ${(tokIn+tokOut).toLocaleString()} tok `
+          +`(${tokIn.toLocaleString()} in · ${tokOut.toLocaleString()} out)</span>` : '';
+        status.innerHTML=`<span class="banner ${cls}">${icon} ${txt}</span>`+tk;
         const p=judgeCard && judgeCard.querySelector('pre.spin');   // judge never ran (panel empty/all failed)
         if(p) p.outerHTML=`<pre class="meta">No verdict — the panel produced no answers to judge.</pre>`;
       }

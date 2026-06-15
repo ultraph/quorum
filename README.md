@@ -91,6 +91,10 @@ The picker: `↑/↓` move, `space` toggle, `a` all, `n` none, `enter` confirm,
 `q` cancel. If your terminal can't run curses (or output is piped), it falls
 back to a numbered prompt automatically.
 
+After each run quorum prints a **token table** — input/output per model plus a
+total. API models report exact counts; CLI models (`claude -p`, `codex exec`)
+don't expose usage, so those rows are a `~` estimate. `--save` includes it too.
+
 ## Web UI (optional)
 
 Prefer a browser over the terminal? quorum ships a local web UI: tick the panel
@@ -118,6 +122,8 @@ What the browser adds over the terminal:
   weighs it alongside the live models.
 - **Attach a file** — add a text file (`.md`, `.txt`, code, …) and the whole
   panel and the judge analyze its contents.
+- **Token usage** — exact input/output token counts per model and a grand total
+  (read from each API's `usage`); CLI-mode models show a `~` estimate.
 
 It binds to `127.0.0.1` only (localhost) — it runs with your keys, so it is not
 exposed to the network. The CLI has zero dependencies; these extras are needed

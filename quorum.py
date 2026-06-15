@@ -105,6 +105,9 @@ class Model:
     answer: str = ""
     error: str = ""
     seconds: float = 0.0
+    tokens_in: int = 0       # prompt tokens (exact, from API usage)
+    tokens_out: int = 0      # completion tokens
+    tokens_est: bool = False # True when counts are a char-based estimate (CLI)
 
 
 @dataclass
@@ -262,6 +265,8 @@ def _api_anthropic(m: Model, prompt: str) -> str:
          "messages": [{"role": "user", "content": prompt}]},
         {"x-api-key": m.api_key, "anthropic-version": "2023-06-01",
          "content-type": "application/json"})
+    u = out.get("usage") or {}
+    m.tokens_in, m.tokens_out = int(u.get("input_tokens", 0)), int(u.get("output_tokens", 0))
     return "".join(b.get("text", "") for b in out["content"]
                    if b.get("type") == "text").strip()
 
@@ -274,6 +279,8 @@ def _api_openai_compatible(m: Model, prompt: str, base: str) -> str:
         {"model": m.model, "messages": [{"role": "user", "content": prompt}],
          "stream": False},
         {"Authorization": f"Bearer {m.api_key}", "Content-Type": "application/json"})
+    u = out.get("usage") or {}
+    m.tokens_in, m.tokens_out = int(u.get("prompt_tokens", 0)), int(u.get("completion_tokens", 0))
     return out["choices"][0]["message"]["content"].strip()
 
 
@@ -285,6 +292,8 @@ def _api_gemini(m: Model, prompt: str) -> str:
         f"{m.model}:generateContent?key={m.api_key}",
         {"contents": [{"parts": [{"text": prompt}]}]},
         {"Content-Type": "application/json"})
+    u = out.get("usageMetadata") or {}
+    m.tokens_in, m.tokens_out = int(u.get("promptTokenCount", 0)), int(u.get("candidatesTokenCount", 0))
     return "".join(p.get("text", "")
                    for p in out["candidates"][0]["content"]["parts"]).strip()
 
@@ -304,6 +313,12 @@ def _bin_ok(binp: str) -> bool:
     return bool(shutil.which(binp)) or os.path.exists(binp)
 
 
+def _est_tokens(text: str) -> int:
+    """Rough char-based token estimate (~4 chars/token) for CLI calls that don't
+    report usage. Approximate — flagged with ~ wherever it's shown."""
+    return round(len(text) / 4)
+
+
 def _cli_claude(m: Model, prompt: str) -> str:
     binp = _find_bin("claude", m.cli_bin)
     if not _bin_ok(binp):
@@ -313,7 +328,9 @@ def _cli_claude(m: Model, prompt: str) -> str:
                        capture_output=True, text=True, timeout=420)
     if p.returncode != 0:
         raise RuntimeError((p.stderr or p.stdout or "claude failed").strip()[:400])
-    return p.stdout.strip()
+    answer = p.stdout.strip()
+    m.tokens_in, m.tokens_out, m.tokens_est = _est_tokens(prompt), _est_tokens(answer), True
+    return answer
 
 
 def _cli_codex(m: Model, prompt: str) -> str:
@@ -327,10 +344,13 @@ def _cli_codex(m: Model, prompt: str) -> str:
              "--skip-git-repo-check", "--cd", td, "-o", str(out), "-"],
             input=prompt, capture_output=True, text=True, timeout=420)
         if out.exists() and (txt := out.read_text().strip()):
-            return txt
-        if p.returncode != 0:
+            answer = txt
+        elif p.returncode != 0:
             raise RuntimeError((p.stderr or p.stdout or "codex failed").strip()[:400])
-        return p.stdout.strip()
+        else:
+            answer = p.stdout.strip()
+        m.tokens_in, m.tokens_out, m.tokens_est = _est_tokens(prompt), _est_tokens(answer), True
+        return answer
 
 
 def call_model(m: Model, prompt: str) -> str:
@@ -398,6 +418,31 @@ def run_judge(judge: Model, question: str, panel: list[Model]) -> str:
         return call_model(judge, prompt)
     except Exception as e:  # noqa: BLE001
         return f"(judge failed: {str(e)[:300]})"
+
+
+def token_rows(panel_snapshot, judge, use_judge):
+    """Build (label, in, out, estimated) rows for the token summary.
+
+    panel_snapshot is captured BEFORE the judge runs: a judge that reuses a
+    panelist (judge.use = name) shares its Model object, so the judge call would
+    otherwise overwrite that panelist's own counts."""
+    rows = [(name, ti, to, est) for (name, ti, to, est, err) in panel_snapshot
+            if not err and (ti or to)]
+    if use_judge and judge is not None and (judge.tokens_in or judge.tokens_out):
+        rows.append((f"judge:{judge.name}", judge.tokens_in, judge.tokens_out, judge.tokens_est))
+    return rows
+
+
+def format_token_table(rows) -> list[str]:
+    """Aligned console lines for the token rows, with a total at the bottom."""
+    w = max([len(r[0]) for r in rows] + [len("total")])
+    lines = []
+    for label, ti, to, est in rows:
+        mark = "~" if est else " "
+        lines.append(f"  {mark}{label:<{w}}  in {ti:>8,}  out {to:>8,}  ({ti + to:>9,})")
+    ti, to = sum(r[1] for r in rows), sum(r[2] for r in rows)
+    lines.append(f"   {'total':<{w}}  in {ti:>8,}  out {to:>8,}  ({ti + to:>9,})")
+    return lines
 
 
 # --- interactive checkbox picker -------------------------------------------
@@ -726,11 +771,25 @@ def main() -> None:
         print(f"{BOLD}{CYA}━━━ {m.name} ({m.provider}/{m.model}) ━━━{RST}")
         print(f"{RED}ERROR: {m.error}{RST}\n" if m.error else render_md(m.answer) + "\n")
 
+    # snapshot panel token usage now — a reused judge shares a panelist's object
+    # and the judge call below would overwrite its counts.
+    panel_snapshot = [(m.name, m.tokens_in, m.tokens_out, m.tokens_est, bool(m.error))
+                      for m in panel]
+
     judge_text = ""
     if use_judge:
         print(f"{BOLD}{YEL}━━━ JUDGE ({judge.name}: {judge.provider}/{judge.model}) ━━━{RST}")
         judge_text = run_judge(judge, question, panel)
         print(render_md(judge_text) + "\n")
+
+    rows = token_rows(panel_snapshot, judge, use_judge)
+    if rows:
+        print(f"{BOLD}{CYA}━━━ TOKENS ━━━{RST}")
+        for ln in format_token_table(rows):
+            print(ln)
+        if any(est for *_, est in rows):
+            print(f"{DIM}  ~ estimated (CLI reports no usage; ~4 chars/token).{RST}")
+        print()
 
     if args.save:
         md = [f"# quorum\n", f"## Question\n\n{question}\n"]
@@ -739,6 +798,13 @@ def main() -> None:
             md.append(f"```\nERROR: {m.error}\n```\n" if m.error else m.answer + "\n")
         if judge_text:
             md.append(f"## Judge ({judge.name})\n\n{judge_text}\n")
+        if rows:
+            md.append("## Tokens\n")
+            md.append("| | in | out | total |\n|---|--:|--:|--:|")
+            for label, ti, to, est in rows:
+                md.append(f"| {'~' if est else ''}{label} | {ti:,} | {to:,} | {ti + to:,} |")
+            sin, sout = sum(r[1] for r in rows), sum(r[2] for r in rows)
+            md.append(f"| **total** | **{sin:,}** | **{sout:,}** | **{sin + sout:,}** |\n")
         Path(os.path.expanduser(args.save)).write_text("\n".join(md))
         print(f"{DIM}Saved: {args.save}{RST}")
 
