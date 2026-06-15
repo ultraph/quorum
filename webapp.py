@@ -81,27 +81,37 @@ INDEX_HTML = r"""<!doctype html>
 <title>quorum</title>
 <style>
   :root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --txt:#e6e9ef;
-          --dim:#8b93a3; --acc:#4f8cff; --ok:#3fb950; --err:#f85149; --judge:#d9a441; }
+          --dim:#8b93a3; --acc:#4f8cff; --ok:#3fb950; --err:#f85149; --judge:#d9a441;
+          --inbg:#0c0e12; --hover:#1c2029; --btntxt:#fff; --strong:#fff; }
+  :root[data-theme="light"] {
+          --bg:#f4f6f9; --panel:#ffffff; --line:#d3dae3; --txt:#1b2027;
+          --dim:#586173; --acc:#2563eb; --ok:#197f34; --err:#c81e26; --judge:#9a6a00;
+          --inbg:#eef1f6; --hover:#e7ecf3; --btntxt:#ffffff; --strong:#0a0d12; }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--txt);
          font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
-  header { padding:18px 24px; border-bottom:1px solid var(--line); }
+  header { padding:18px 24px; border-bottom:1px solid var(--line);
+           display:flex; align-items:center; gap:16px; }
   header h1 { margin:0; font-size:20px; } header span { color:var(--dim); font-size:13px; }
+  .theme { background:var(--inbg); color:var(--txt); border:1px solid var(--line);
+           border-radius:8px; padding:6px 10px; font-size:16px; font-weight:400;
+           line-height:1; cursor:pointer; }
+  .theme:hover { background:var(--hover); }
   main { max-width:900px; margin:0 auto; padding:24px; }
   .card { background:var(--panel); border:1px solid var(--line); border-radius:10px;
           padding:16px; margin-bottom:16px; }
   label { color:var(--dim); font-size:13px; display:block; margin-bottom:6px; }
-  textarea { width:100%; min-height:80px; background:#0c0e12; color:var(--txt);
+  textarea { width:100%; min-height:80px; background:var(--inbg); color:var(--txt);
              border:1px solid var(--line); border-radius:8px; padding:10px; resize:vertical;
              font:inherit; }
   .models { display:flex; flex-wrap:wrap; gap:10px; margin:6px 0 14px; }
-  .chk { display:flex; align-items:center; gap:7px; background:#0c0e12; border:1px solid var(--line);
+  .chk { display:flex; align-items:center; gap:7px; background:var(--inbg); border:1px solid var(--line);
          padding:7px 11px; border-radius:20px; cursor:pointer; font-size:14px; }
   .chk input { accent-color:var(--acc); }
   .row { display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
-  select { background:#0c0e12; color:var(--txt); border:1px solid var(--line);
+  select { background:var(--inbg); color:var(--txt); border:1px solid var(--line);
            border-radius:8px; padding:7px 10px; font:inherit; }
-  button { background:var(--acc); color:#fff; border:0; border-radius:8px; padding:10px 20px;
+  button { background:var(--acc); color:var(--btntxt); border:0; border-radius:8px; padding:10px 20px;
            font:inherit; font-weight:600; cursor:pointer; }
   button:disabled { opacity:.5; cursor:default; }
   .res h3 { margin:0 0 4px; font-size:15px; }
@@ -115,7 +125,7 @@ INDEX_HTML = r"""<!doctype html>
   details.card > summary::-webkit-details-marker { display:none; }
   details.card > summary::before { content:'▶'; color:var(--dim); font-size:10px; }
   details.card[open] > summary::before { content:'▼'; }
-  details.card > summary:hover { background:#1c2029; }
+  details.card > summary:hover { background:var(--hover); }
   details.card > summary .name { font-weight:600; font-size:15px; }
   details.card > summary .meta { margin-left:auto; margin-bottom:0; }
   details.card > .md, details.card > pre { padding:0 16px 16px; margin:0; }
@@ -128,17 +138,28 @@ INDEX_HTML = r"""<!doctype html>
   .md h1 { font-size:20px; } .md h2 { font-size:18px; }
   .md h3 { font-size:16px; } .md h4 { font-size:15px; }
   .md ul,.md ol { margin:0 0 10px; padding-left:22px; } .md li { margin:3px 0; }
-  .md code { background:#0c0e12; border:1px solid var(--line); border-radius:4px;
+  .md code { background:var(--inbg); border:1px solid var(--line); border-radius:4px;
              padding:1px 5px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.9em; }
-  .md pre.code { background:#0c0e12; border:1px solid var(--line); border-radius:8px;
+  .md pre.code { background:var(--inbg); border:1px solid var(--line); border-radius:8px;
                  padding:12px; overflow:auto; margin:0 0 10px; }
   .md pre.code code { background:none; border:0; padding:0; font-size:.88em; }
   .md blockquote { margin:0 0 10px; padding:2px 12px; border-left:3px solid var(--line); color:var(--dim); }
-  .md a { color:var(--acc); } .md strong { color:#fff; }
+  .md a { color:var(--acc); } .md strong { color:var(--strong); }
   .md hr { border:0; border-top:1px solid var(--line); margin:12px 0; }
-</style></head>
+</style>
+<script>
+  // set theme before first paint to avoid a flash of the wrong colors
+  (function(){
+    var t = localStorage.getItem('theme')
+            || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+    if (t === 'light') document.documentElement.setAttribute('data-theme','light');
+  })();
+</script></head>
 <body>
-<header><h1>quorum</h1> <span>ask a panel of LLMs · one judge synthesizes</span></header>
+<header>
+  <div style="flex:1"><h1>quorum</h1> <span>ask a panel of LLMs · one judge synthesizes</span></div>
+  <button id="theme" class="theme" title="Toggle light / dark theme">🌙</button>
+</header>
 <main>
   <div class="card">
     <label>Question</label>
@@ -271,6 +292,18 @@ async function ask(){
   btn.disabled=false;
 }
 document.getElementById('ask').addEventListener('click',ask);
+
+const themeBtn=document.getElementById('theme');
+function curTheme(){ return document.documentElement.getAttribute('data-theme')==='light' ? 'light' : 'dark'; }
+function applyTheme(t){
+  if(t==='light') document.documentElement.setAttribute('data-theme','light');
+  else document.documentElement.removeAttribute('data-theme');
+  localStorage.setItem('theme',t);
+  themeBtn.textContent = t==='light' ? '☀️' : '🌙';
+}
+applyTheme(curTheme());   // sync the icon with the theme set before paint
+themeBtn.addEventListener('click',()=>applyTheme(curTheme()==='light'?'dark':'light'));
+
 loadModels();
 </script>
 </body></html>"""
