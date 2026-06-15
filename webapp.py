@@ -109,6 +109,16 @@ INDEX_HTML = r"""<!doctype html>
   .res pre { white-space:pre-wrap; word-wrap:break-word; margin:0; font:inherit; }
   .judge { border-color:var(--judge); }
   .judge h3 { color:var(--judge); }
+  details.card { padding:0; }
+  details.card > summary { padding:14px 16px; cursor:pointer; list-style:none;
+    display:flex; align-items:center; gap:10px; }
+  details.card > summary::-webkit-details-marker { display:none; }
+  details.card > summary::before { content:'▶'; color:var(--dim); font-size:10px; }
+  details.card[open] > summary::before { content:'▼'; }
+  details.card > summary:hover { background:#1c2029; }
+  details.card > summary .name { font-weight:600; font-size:15px; }
+  details.card > summary .meta { margin-left:auto; margin-bottom:0; }
+  details.card > .md, details.card > pre { padding:0 16px 16px; margin:0; }
   .err { color:var(--err); }
   .ok { color:var(--ok); } .spin { color:var(--dim); }
   .foot { color:var(--dim); font-size:13px; margin-top:8px; }
@@ -231,8 +241,12 @@ async function ask(){
       if(o.type==='model'){
         const body = o.error ? `<pre class="err">ERROR: ${esc(o.error)}</pre>`
                              : `<div class="md">${mdToHtml(o.answer)}</div>`;
-        out.appendChild(card(`<h3>${o.name} <span class="${o.error?'err':'ok'}">${o.error?'✗':'✓'}</span></h3>
-          <div class="meta">${o.provider}/${o.model} · ${o.seconds}s</div>${body}`));
+        const d=document.createElement('details'); d.className='card res';
+        if(o.error) d.open=true;                        // keep errors visible
+        d.innerHTML=`<summary><span class="name">${o.name} `+
+          `<span class="${o.error?'err':'ok'}">${o.error?'✗':'✓'}</span></span>`+
+          `<span class="meta">${o.provider}/${o.model} · ${o.seconds}s</span></summary>${body}`;
+        out.appendChild(d);
       } else if(o.type==='judge_start'){
         judgeCard=card(`<h3>Judge — ${o.name}</h3><pre class="spin">synthesizing…</pre>`,'judge');
         out.appendChild(judgeCard);
