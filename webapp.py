@@ -226,10 +226,15 @@ async function ask(){
   if(!panel.length){ status.textContent='Pick at least one model.'; return; }
   const btn=document.getElementById('ask'); btn.disabled=true; status.textContent='Asking '+panel.length+' model(s)…';
 
+  let judgeCard=null;
+  if(judge){   // reserve the verdict slot at the top up front so nothing jumps later
+    judgeCard=card(`<h3>Judge — ${esc(judge)}</h3><pre class="spin">waiting for panel…</pre>`,'judge');
+    out.appendChild(judgeCard);
+  }
+
   const resp=await fetch('/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({question:q,panel:panel,judge:judge||null,use_judge:!!judge})});
   const reader=resp.body.getReader(); const dec=new TextDecoder(); let buf='';
-  let judgeCard=null;
   while(true){
     const {value,done}=await reader.read(); if(done) break;
     buf+=dec.decode(value,{stream:true});
@@ -248,12 +253,19 @@ async function ask(){
           `<span class="meta">${o.provider}/${o.model} · ${o.seconds}s</span></summary>${body}`;
         out.appendChild(d);
       } else if(o.type==='judge_start'){
-        judgeCard=card(`<h3>Judge — ${o.name}</h3><pre class="spin">synthesizing…</pre>`,'judge');
-        out.insertBefore(judgeCard, out.firstChild);   // judge verdict on top
+        if(!judgeCard){   // fallback: judge wasn't pre-reserved
+          judgeCard=card(`<h3>Judge — ${esc(o.name)}</h3><pre class="spin"></pre>`,'judge');
+          out.insertBefore(judgeCard, out.firstChild);
+        }
+        const p=judgeCard.querySelector('pre'); if(p) p.textContent='synthesizing…';
       } else if(o.type==='judge'){
         if(judgeCard) judgeCard.querySelector('pre').outerHTML=`<div class="md">${mdToHtml(o.text)}</div>`;
       } else if(o.type==='error'){ status.textContent=o.message; }
-      else if(o.type==='done'){ status.textContent='Done.'; }
+      else if(o.type==='done'){
+        status.textContent='Done.';
+        const p=judgeCard && judgeCard.querySelector('pre.spin');   // judge never ran (panel empty/all failed)
+        if(p) p.outerHTML=`<pre class="meta">No verdict — the panel produced no answers to judge.</pre>`;
+      }
     }
   }
   btn.disabled=false;
