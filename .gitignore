@@ -6,3 +6,6 @@ config.toml
 *.md.out
 __pycache__/
 *.pyc
+# local virtualenv (see README venv workaround)
+.venv/
+venv/

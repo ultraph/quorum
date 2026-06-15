@@ -20,6 +20,7 @@ import base64
 import getpass
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -40,6 +41,53 @@ def _c(code: str) -> str:
 BOLD, DIM, RED, GRN, YEL, CYA, RST = (
     _c("\033[1m"), _c("\033[2m"), _c("\033[31m"), _c("\033[32m"),
     _c("\033[33m"), _c("\033[36m"), _c("\033[0m"))
+
+
+def render_md(text: str) -> str:
+    """Render Markdown to ANSI for the terminal so model answers don't show raw
+    `**` / `#` markup. On non-TTY output (a pipe, a redirect, or --save) the text
+    is returned unchanged, keeping piped/saved Markdown clean."""
+    if not _TTY:
+        return text
+    b, _b = "\033[1m", "\033[22m"      # bold on / off
+    i, _i = "\033[3m", "\033[23m"      # italic on / off
+    cy, _cy = "\033[36m", "\033[39m"   # inline code: cyan / default fg
+    dim, rst = "\033[2m", "\033[0m"
+
+    def inline(t: str) -> str:
+        codes: list[str] = []
+        def stash(m: "re.Match") -> str:
+            codes.append(m.group(1)); return f"\0{len(codes) - 1}\0"
+        t = re.sub(r"`([^`]+)`", stash, t)                       # protect code spans
+        t = re.sub(r"\*\*([^*]+)\*\*", lambda m: f"{b}{m.group(1)}{_b}", t)
+        t = re.sub(r"__([^_]+)__", lambda m: f"{b}{m.group(1)}{_b}", t)
+        t = re.sub(r"(^|[^*])\*([^*\n]+)\*", lambda m: f"{m.group(1)}{i}{m.group(2)}{_i}", t)
+        t = re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)",
+                   lambda m: f"{m.group(1)} {dim}({m.group(2)}){rst}", t)
+        return re.sub(r"\0(\d+)\0", lambda m: f"{cy}{codes[int(m.group(1))]}{_cy}", t)
+
+    out, in_code = [], False
+    for ln in text.replace("\r\n", "\n").split("\n"):
+        if re.match(r"^\s*```\w*\s*$", ln):
+            in_code = not in_code; continue
+        if in_code:
+            out.append(f"{dim}    {ln}{rst}"); continue
+        m = re.match(r"^(#{1,6})\s+(.*)$", ln)
+        if m:
+            out.append(f"{b}{inline(m.group(2))}{_b}"); continue
+        if re.match(r"^\s*([-*_])\1\1+\s*$", ln):
+            out.append(f"{dim}{'─' * 40}{rst}"); continue
+        m = re.match(r"^\s*>\s?(.*)$", ln)
+        if m:
+            out.append(f"{dim}│{rst} {inline(m.group(1))}"); continue
+        m = re.match(r"^(\s*)[-*+]\s+(.*)$", ln)
+        if m:
+            out.append(f"{m.group(1)}  • {inline(m.group(2))}"); continue
+        m = re.match(r"^(\s*)(\d+)[.)]\s+(.*)$", ln)
+        if m:
+            out.append(f"{m.group(1)}  {m.group(2)}. {inline(m.group(3))}"); continue
+        out.append(inline(ln))
+    return "\n".join(out)
 
 
 # --- model definitions ------------------------------------------------------
@@ -676,13 +724,13 @@ def main() -> None:
     print()
     for m in panel:
         print(f"{BOLD}{CYA}━━━ {m.name} ({m.provider}/{m.model}) ━━━{RST}")
-        print(f"{RED}ERROR: {m.error}{RST}\n" if m.error else m.answer + "\n")
+        print(f"{RED}ERROR: {m.error}{RST}\n" if m.error else render_md(m.answer) + "\n")
 
     judge_text = ""
     if use_judge:
         print(f"{BOLD}{YEL}━━━ JUDGE ({judge.name}: {judge.provider}/{judge.model}) ━━━{RST}")
         judge_text = run_judge(judge, question, panel)
-        print(judge_text + "\n")
+        print(render_md(judge_text) + "\n")
 
     if args.save:
         md = [f"# quorum\n", f"## Question\n\n{question}\n"]

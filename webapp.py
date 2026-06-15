@@ -75,7 +75,7 @@ async def api_ask(req: Request) -> StreamingResponse:
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
-INDEX_HTML = """<!doctype html>
+INDEX_HTML = r"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>quorum</title>
@@ -112,6 +112,20 @@ INDEX_HTML = """<!doctype html>
   .err { color:var(--err); }
   .ok { color:var(--ok); } .spin { color:var(--dim); }
   .foot { color:var(--dim); font-size:13px; margin-top:8px; }
+  .md > :first-child { margin-top:0; } .md > :last-child { margin-bottom:0; }
+  .md p { margin:0 0 10px; }
+  .md h1,.md h2,.md h3,.md h4 { margin:14px 0 8px; line-height:1.3; }
+  .md h1 { font-size:20px; } .md h2 { font-size:18px; }
+  .md h3 { font-size:16px; } .md h4 { font-size:15px; }
+  .md ul,.md ol { margin:0 0 10px; padding-left:22px; } .md li { margin:3px 0; }
+  .md code { background:#0c0e12; border:1px solid var(--line); border-radius:4px;
+             padding:1px 5px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.9em; }
+  .md pre.code { background:#0c0e12; border:1px solid var(--line); border-radius:8px;
+                 padding:12px; overflow:auto; margin:0 0 10px; }
+  .md pre.code code { background:none; border:0; padding:0; font-size:.88em; }
+  .md blockquote { margin:0 0 10px; padding:2px 12px; border-left:3px solid var(--line); color:var(--dim); }
+  .md a { color:var(--acc); } .md strong { color:#fff; }
+  .md hr { border:0; border-top:1px solid var(--line); margin:12px 0; }
 </style></head>
 <body>
 <header><h1>quorum</h1> <span>ask a panel of LLMs · one judge synthesizes</span></header>
@@ -152,6 +166,46 @@ function selectedPanel(){ return MODELS.filter(m=>document.getElementById('m_'+m
 function card(html, cls){ const d=document.createElement('div'); d.className='card res '+(cls||''); d.innerHTML=html; return d; }
 function esc(s){ return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 
+// Tiny self-contained Markdown → HTML (no external deps). Text is HTML-escaped
+// first, then only our own tags are added, so model output can't inject HTML.
+function mdToHtml(src){
+  src=(src||'').replace(/\r\n?/g,'\n');
+  const blocks=[];
+  src=src.replace(/```[\w-]*\n?([\s\S]*?)```/g,(_,code)=>{
+    blocks.push('<pre class="code"><code>'+esc(code.replace(/\n+$/,''))+'</code></pre>');
+    return '\u0000B'+(blocks.length-1)+'\u0000';
+  });
+  function inline(t){
+    const codes=[];
+    t=esc(t).replace(/`([^`]+)`/g,(_,c)=>{codes.push(c);return '\u0000C'+(codes.length-1)+'\u0000';});
+    t=t.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>')
+       .replace(/__([^_]+)__/g,'<strong>$1</strong>')
+       .replace(/(^|[^*])\*([^*\n]+)\*/g,'$1<em>$2</em>')
+       .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)"]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+    return t.replace(/\u0000C(\d+)\u0000/g,(_,n)=>'<code>'+codes[n]+'</code>');
+  }
+  const isBreak=l=>/^\s*$/.test(l)||/^\u0000B\d+\u0000$/.test(l)||/^(#{1,6})\s+/.test(l)
+    ||/^\s*>\s?/.test(l)||/^\s*[-*+]\s+/.test(l)||/^\s*\d+[.)]\s+/.test(l)||/^\s*([-*_])\1\1+\s*$/.test(l);
+  const lines=src.split('\n'), out=[]; let list=null;
+  const closeList=()=>{ if(list){ out.push('</'+list+'>'); list=null; } };
+  for(let n=0;n<lines.length;n++){
+    const ln=lines[n]; let m;
+    if(m=ln.match(/^\u0000B(\d+)\u0000$/)){ closeList(); out.push(blocks[+m[1]]); continue; }
+    if(/^\s*$/.test(ln)){ closeList(); continue; }
+    if(m=ln.match(/^(#{1,6})\s+(.*)$/)){ closeList(); const lv=m[1].length; out.push('<h'+lv+'>'+inline(m[2])+'</h'+lv+'>'); continue; }
+    if(/^\s*([-*_])\1\1+\s*$/.test(ln)){ closeList(); out.push('<hr>'); continue; }
+    if(m=ln.match(/^\s*>\s?(.*)$/)){ closeList(); out.push('<blockquote>'+inline(m[1])+'</blockquote>'); continue; }
+    if(m=ln.match(/^\s*[-*+]\s+(.*)$/)){ if(list!=='ul'){ closeList(); out.push('<ul>'); list='ul'; } out.push('<li>'+inline(m[1])+'</li>'); continue; }
+    if(m=ln.match(/^\s*\d+[.)]\s+(.*)$/)){ if(list!=='ol'){ closeList(); out.push('<ol>'); list='ol'; } out.push('<li>'+inline(m[1])+'</li>'); continue; }
+    closeList();
+    const para=[ln];
+    while(n+1<lines.length && !isBreak(lines[n+1])){ para.push(lines[n+1]); n++; }
+    out.push('<p>'+para.map(inline).join('<br>')+'</p>');
+  }
+  closeList();
+  return out.join('\n');
+}
+
 async function ask(){
   const q=document.getElementById('q').value.trim();
   const panel=selectedPanel();
@@ -170,7 +224,7 @@ async function ask(){
     const {value,done}=await reader.read(); if(done) break;
     buf+=dec.decode(value,{stream:true});
     let i;
-    while((i=buf.indexOf('\\n\\n'))>=0){
+    while((i=buf.indexOf('\n\n'))>=0){
       const line=buf.slice(0,i); buf=buf.slice(i+2);
       if(!line.startsWith('data: ')) continue;
       const o=JSON.parse(line.slice(6));
