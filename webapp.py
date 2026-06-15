@@ -375,7 +375,7 @@ function providerColor(p){ return PCOLOR[(p||'').toLowerCase()] || 'var(--acc)';
 function fmtTok(o){
   const ti=o.tokens_in||0, to=o.tokens_out||0;
   if(!ti && !to) return '';
-  return ` · ${o.tokens_est?'~':''}${ti.toLocaleString()}→${to.toLocaleString()} tok`;
+  return ` · in ${ti.toLocaleString()} · out ${to.toLocaleString()} tok${o.tokens_est?' (~est)':''}`;
 }
 
 // Tiny self-contained Markdown → HTML (no external deps). Text is HTML-escaped
@@ -504,8 +504,8 @@ async function ask(){
         let cls='ok', icon='✓', txt=`all ${total} answered`;
         if(okN===0){ cls='err'; icon='✗'; txt=`all ${total} failed`; }
         else if(errN){ cls='warn'; icon='⚠'; txt=`${okN}/${total} answered · ${errN} failed`; }
-        const tk=(tokIn||tokOut) ? ` <span class="meta">· ${(tokIn+tokOut).toLocaleString()} tok `
-          +`(${tokIn.toLocaleString()} in · ${tokOut.toLocaleString()} out)</span>` : '';
+        const tk=(tokIn||tokOut) ? ` <span class="meta">· total ${(tokIn+tokOut).toLocaleString()} tok `
+          +`(in ${tokIn.toLocaleString()} · out ${tokOut.toLocaleString()})</span>` : '';
         status.innerHTML=`<span class="banner ${cls}">${icon} ${txt}</span>`+tk;
         const p=judgeCard && judgeCard.querySelector('pre.spin');   // judge never ran (panel empty/all failed)
         if(p) p.outerHTML=`<pre class="meta">No verdict — the panel produced no answers to judge.</pre>`;
