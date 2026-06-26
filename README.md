@@ -12,7 +12,8 @@ your **local CLI login** (`claude -p` / `codex exec`) - your choice, per model.
 - **Pick your judge.** Any model, or none.
 - **Providers:** Anthropic (Claude), OpenAI (GPT), Google (Gemini), DeepSeek.
 - **Optional web UI.** A local browser front-end (`--web`) with rendered
-  Markdown, light/dark themes, pasted outside opinions, and file attachments.
+  Markdown, light/dark themes, pasted outside opinions, file attachments, and
+  one-click copy / download of any answer.
 
 ## Why
 
@@ -124,6 +125,9 @@ What the browser adds over the terminal:
   panel and the judge analyze its contents.
 - **Token usage** — exact input/output token counts per model and a grand total
   (read from each API's `usage`); CLI-mode models show a `~` estimate.
+- **Copy & download any answer** — every card (the judge's verdict and each
+  model's answer) has one-click **Copy** and **Download .md** buttons, so you
+  grab the raw Markdown without selecting text by hand.
 
 It binds to `127.0.0.1` only (localhost) — it runs with your keys, so it is not
 exposed to the network. The CLI has zero dependencies; these extras are needed
