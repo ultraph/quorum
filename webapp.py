@@ -164,6 +164,9 @@ INDEX_HTML = r"""<!doctype html>
   .res pre { white-space:pre-wrap; word-wrap:break-word; margin:0; font:inherit; }
   .judge { border-color:var(--judge); }
   .judge h3 { color:var(--judge); }
+  .jactions { display:flex; gap:8px; margin-top:14px; padding-top:12px; border-top:1px solid var(--line); }
+  details.card .jactions { margin:0 16px; padding:12px 0 16px; }
+  .jbtn { font-size:13px; padding:6px 12px; }
   details.card { padding:0; }
   details.card > summary { padding:14px 16px; cursor:pointer; list-style:none;
     display:flex; align-items:center; gap:10px; }
@@ -418,6 +421,35 @@ function mdToHtml(src){
   return out.join('\n');
 }
 
+// Copy / download buttons for an answer (raw markdown, as the model wrote it).
+// `slug` goes into the download filename, e.g. quorum-verdict-… / quorum-gpt-4o-…
+function addCopyActions(cardEl, text, slug){
+  if(cardEl.querySelector('.jactions')) return;   // don't double up
+  const bar=document.createElement('div'); bar.className='jactions';
+  bar.innerHTML=`<button type="button" class="jbtn ghost jcopy">📋 Copy</button>`+
+                `<button type="button" class="jbtn ghost jdl">⬇ Download .md</button>`;
+  cardEl.appendChild(bar);
+  const flash=(btn,msg)=>{ const old=btn.textContent; btn.textContent=msg;
+    setTimeout(()=>{ btn.textContent=old; },1500); };
+  bar.querySelector('.jcopy').addEventListener('click',async ev=>{
+    const btn=ev.currentTarget;
+    try{ await navigator.clipboard.writeText(text); }
+    catch(e){ const ta=document.createElement('textarea'); ta.value=text;
+      ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta);
+      ta.select(); try{ document.execCommand('copy'); }catch(_){} ta.remove(); }
+    flash(btn,'✓ Copied');
+  });
+  bar.querySelector('.jdl').addEventListener('click',()=>{
+    const stamp=new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
+    const base=(slug||'answer').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'')||'answer';
+    const blob=new Blob([text],{type:'text/markdown;charset=utf-8'});
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+    a.download=`quorum-${base}-${stamp}.md`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+  });
+}
+
 async function ask(){
   const q=document.getElementById('q').value.trim();
   const panel=selectedPanel();
@@ -482,6 +514,7 @@ async function ask(){
         d.innerHTML=`<summary><span class="dot" style="background:${col}"></span>`+
           `<span class="name">${esc(o.name)} ${mark}</span>`+
           `<span class="meta">${meta}</span></summary>${body}`;
+        if(!o.error) addCopyActions(d, o.answer, o.name);
         const ph=pending[o.name];                       // swap the skeleton in place
         if(ph){ ph.el.replaceWith(d); delete pending[o.name]; } else out.appendChild(d);
       } else if(o.type==='judge_start'){
@@ -495,6 +528,7 @@ async function ask(){
           judgeCard.querySelector('pre').outerHTML=`<div class="md">${mdToHtml(o.text)}</div>`;
           const b=fmtTok(o); const h=judgeCard.querySelector('h3');
           if(b && h) h.innerHTML+=`<span class="meta">${b}</span>`;
+          addCopyActions(judgeCard, o.text, 'verdict');
         }
         tokIn+=o.tokens_in||0; tokOut+=o.tokens_out||0;
       } else if(o.type==='error'){ status.className='foot'; status.innerHTML=`<span class="banner err">✗ ${esc(o.message)}</span>`; }
