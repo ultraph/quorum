@@ -7,7 +7,6 @@ You choose who sits on the panel and who judges - with checkboxes or flags.
 Each model can be reached through its **official API** (your key) or through
 your **local CLI login** (`claude -p` / `codex exec`) - your choice, per model.
 
-- **Zero dependencies.** The CLI is pure Python standard library. No `pip install`.
 - **Pick your panel.** Interactive checkboxes, or `--panel a,b,c` for scripts.
 - **Pick your judge.** Any model, or none.
 - **Providers:** Anthropic (Claude), OpenAI (GPT), Google (Gemini), DeepSeek.
