@@ -319,12 +319,17 @@ def _est_tokens(text: str) -> int:
     return round(len(text) / 4)
 
 
-def _cli_claude(m: Model, prompt: str) -> str:
+def _cli_claude(m: Model, prompt: str, web_tools: bool = False) -> str:
     binp = _find_bin("claude", m.cli_bin)
     if not _bin_ok(binp):
         raise RuntimeError("claude CLI not found — install it and log in "
                            "(run `claude`, then /login)")
-    p = subprocess.run([binp, "-p", "--model", m.model], input=prompt,
+    cmd = [binp, "-p", "--model", m.model]
+    if web_tools:
+        # Let a research run follow and cross-check as many relevant sources as
+        # it needs. The subprocess timeout below remains the emergency stop.
+        cmd += ["--allowedTools", "WebSearch", "WebFetch"]
+    p = subprocess.run(cmd, input=prompt,
                        capture_output=True, text=True, timeout=420)
     if p.returncode != 0:
         raise RuntimeError((p.stderr or p.stdout or "claude failed").strip()[:400])
@@ -339,24 +344,34 @@ def _cli_codex(m: Model, prompt: str) -> str:
         raise RuntimeError("codex CLI not found — install it and log in (`codex login`)")
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "last.txt"
+        cmd = [binp, "exec"]
+        # A ChatGPT-plan account has its own entitlement-aware default model.
+        # Do not pass API-only model IDs when config asks for that default.
+        if m.model and m.model != "default":
+            cmd += ["--model", m.model]
+        cmd += ["--sandbox", "read-only", "--skip-git-repo-check", "--cd", td,
+                "-o", str(out), "-"]
         p = subprocess.run(
-            [binp, "exec", "--model", m.model, "--sandbox", "read-only",
-             "--skip-git-repo-check", "--cd", td, "-o", str(out), "-"],
+            cmd,
             input=prompt, capture_output=True, text=True, timeout=420)
         if out.exists() and (txt := out.read_text().strip()):
             answer = txt
         elif p.returncode != 0:
-            raise RuntimeError((p.stderr or p.stdout or "codex failed").strip()[:400])
+            # Codex writes a long run banner before the actionable error. Keep
+            # the end, otherwise a model/entitlement error is hidden in the UI.
+            detail = (p.stderr or p.stdout or "codex failed").strip()
+            detail = "\n".join(detail.splitlines()[-12:])
+            raise RuntimeError(detail[-1000:])
         else:
             answer = p.stdout.strip()
         m.tokens_in, m.tokens_out, m.tokens_est = _est_tokens(prompt), _est_tokens(answer), True
         return answer
 
 
-def call_model(m: Model, prompt: str) -> str:
+def call_model(m: Model, prompt: str, web_tools: bool = False) -> str:
     if m.auth == "cli":
         if m.provider == "anthropic":
-            return _cli_claude(m, prompt)
+            return _cli_claude(m, prompt, web_tools)
         if m.provider == "openai":
             return _cli_codex(m, prompt)
         raise RuntimeError(f"auth=cli unsupported for provider '{m.provider}'")
@@ -372,10 +387,10 @@ def call_model(m: Model, prompt: str) -> str:
     raise RuntimeError(f"unknown provider '{m.provider}'")
 
 
-def run_model(m: Model, prompt: str) -> Model:
+def run_model(m: Model, prompt: str, web_tools: bool = False) -> Model:
     t0 = time.time()
     try:
-        m.answer = call_model(m, prompt)
+        m.answer = call_model(m, prompt, web_tools)
     except urllib.error.HTTPError as e:
         m.error = f"HTTP {e.code}: {e.read().decode(errors='replace')[:200]}"
     except Exception as e:  # noqa: BLE001

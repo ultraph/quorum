@@ -101,6 +101,24 @@ Prefer a browser over the terminal? quorum ships a local web UI: tick the panel
 models, pick a judge, ask, and watch each answer stream in live with the
 judge's verdict synthesized on top.
 
+### Research pipeline
+
+The primary web workflow is a fact-checking pipeline rather than a vote between
+models. Paste research you collected in Grok (including source URLs), then
+quorum runs:
+
+1. **Claude** opens and checks the supplied sources (and searches for a primary
+   source when needed), then writes a draft;
+2. **GPT/Codex** independently reviews factual support, source quality, and
+   reasoning;
+3. **Claude** verifies material corrections and produces the final text.
+
+The manual Grok paste is deliberate: it works without an xAI API key. Claude's
+web access is enabled only for this pipeline; it uses Claude Code's `WebFetch`
+and `WebSearch` tools. You can add revision notes and run the pipeline again.
+The old free-form multi-model panel remains available in a collapsed **Ad-hoc
+panel** section.
+
 ```bash
 pip install -r requirements-web.txt   # one-time; the CLI itself stays dependency-free
 quorum --web                          # opens http://127.0.0.1:8765 in your browser
