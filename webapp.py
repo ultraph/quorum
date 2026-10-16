@@ -420,6 +420,8 @@ INDEX_HTML = r"""<!doctype html>
     <label>1. Что нужно подготовить?</label>
     <textarea id="pipeQ" placeholder="Например: подготовь проверенный разбор новости…"></textarea>
     <label style="margin-top:14px">2. Исследование из Grok <span style="font-weight:400">— вставь текст, посты и URL источников</span></label>
+    <div class="foot" style="margin:-2px 0 8px">Сначала скопируй готовый запрос в Grok; его ответ уже будет пригоден для вставки сюда.</div>
+    <button type="button" id="copyGrokPrompt" class="ghost">📋 Copy prompt for Grok</button>
     <textarea id="grokNotes" style="min-height:180px" placeholder="Вставь сюда результат поиска Grok. Сохраняй ссылки, даты и цитаты — они пойдут автору и фактчекеру."></textarea>
     <label style="margin-top:14px">3. Что исправить в следующей версии? <span style="font-weight:400">— необязательно</span></label>
     <textarea id="revisionNotes" style="min-height:70px" placeholder="Например: сократи до 500 слов, проверь цифру из второго источника, добавь контекст…"></textarea>
@@ -547,6 +549,45 @@ function fmtTok(o){
 }
 
 const PIPE_LABEL={draft:'1. Claude — draft',review:'2. GPT/Codex — fact-check review',final:'3. Claude — final'};
+function grokResearchPrompt(){
+  const task=document.getElementById('pipeQ').value.trim() || '[вставь тему или вопрос]';
+  return `Исследуй тему: ${task}
+
+Подготовь единый пакет исследования для последующей проверки другим ИИ. Не пиши длинную статью и не скрывай источники.
+
+Формат ответа строго такой:
+
+## Краткий вывод
+3–7 ключевых тезисов.
+
+## Проверяемые факты
+Для каждого факта:
+- утверждение;
+- дата или период;
+- степень уверенности;
+- прямая ссылка на первоисточник.
+
+## Свежие сигналы из X
+Отдельно перечисли существенные посты и реакции.
+Для каждого укажи автора, дату, URL и пометку «сигнал, требует независимого подтверждения», если это не первичный источник.
+
+## Источники
+Нумерованный список всех URL. В приоритете: официальные сайты, документы, заявления компаний, первичные данные и надёжные СМИ. Не придумывай ссылки. Если источник недоступен или вывод основан лишь на X-посте — укажи это явно.
+
+Ничего не утверждай как факт без URL рядом с утверждением.`;
+}
+async function copyGrokPrompt(){
+  const text=grokResearchPrompt(), btn=document.getElementById('copyGrokPrompt');
+  try{ await navigator.clipboard.writeText(text); }
+  catch(e){
+    const ta=document.createElement('textarea'); ta.value=text;
+    ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta);
+    ta.select(); document.execCommand('copy'); ta.remove();
+  }
+  const old=btn.textContent; btn.textContent='✓ Prompt copied';
+  document.getElementById('pipelineStatus').textContent='Вставь prompt в Grok, затем скопируй его полный ответ в поле 2.';
+  setTimeout(()=>{ btn.textContent=old; },1800);
+}
 async function runPipeline(){
   const question=document.getElementById('pipeQ').value.trim();
   const research=document.getElementById('grokNotes').value.trim();
@@ -771,6 +812,7 @@ async function ask(){
 }
 document.getElementById('ask').addEventListener('click',ask);
 document.getElementById('runPipeline').addEventListener('click',runPipeline);
+document.getElementById('copyGrokPrompt').addEventListener('click',copyGrokPrompt);
 document.getElementById('addExtra').addEventListener('click',addExtraRow);
 document.getElementById('attachBtn').addEventListener('click',()=>document.getElementById('file').click());
 document.getElementById('file').addEventListener('change',onFiles);

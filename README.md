@@ -104,8 +104,8 @@ judge's verdict synthesized on top.
 ### Research pipeline
 
 The primary web workflow is a fact-checking pipeline rather than a vote between
-models. Paste research you collected in Grok (including source URLs), then
-quorum runs:
+models. Enter the task, use **Copy prompt for Grok**, then paste Grok's
+structured research packet (including source URLs) into quorum. It then runs:
 
 1. **Claude** opens and checks the supplied sources (and searches for a primary
    source when needed), then writes a draft;
