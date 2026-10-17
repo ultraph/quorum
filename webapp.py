@@ -134,9 +134,12 @@ def index() -> str:
 @app.get("/api/models")
 def api_models() -> JSONResponse:
     cfg = q.load_config()
+    def item(m: q.Model) -> dict:
+        return {"name": m.name, "provider": m.provider, "model": m.model,
+                "auth": m.auth, "enabled": m.enabled,
+                "pricing": q.api_price_estimate(m)}
     return JSONResponse({
-        "panel": [{"name": m.name, "provider": m.provider, "model": m.model,
-                   "auth": m.auth, "enabled": m.enabled} for m in cfg.panel],
+        "panel": [item(m) for m in cfg.panel],
         "judge": cfg.judge.name if cfg.judge else None,
         "judge_enabled": cfg.judge_enabled,
     })
@@ -392,7 +395,8 @@ async def api_pipeline(req: Request) -> StreamingResponse:
                     "provider": draft_result.provider, "model": draft_result.model,
                     "answer": draft_result.answer, "error": draft_result.error,
                     "seconds": round(draft_result.seconds, 1), "tokens_in": draft_result.tokens_in,
-                    "tokens_out": draft_result.tokens_out, "tokens_est": draft_result.tokens_est})
+                    "tokens_out": draft_result.tokens_out, "tokens_est": draft_result.tokens_est,
+                    "cost_usd": q.estimated_api_cost(draft_result)})
         if draft_result.error:
             yield _sse({"type": "done", "ok": False})
             return
@@ -406,7 +410,8 @@ async def api_pipeline(req: Request) -> StreamingResponse:
                     "provider": review_result.provider, "model": review_result.model,
                     "answer": review_result.answer, "error": review_result.error,
                     "seconds": round(review_result.seconds, 1), "tokens_in": review_result.tokens_in,
-                    "tokens_out": review_result.tokens_out, "tokens_est": review_result.tokens_est})
+                    "tokens_out": review_result.tokens_out, "tokens_est": review_result.tokens_est,
+                    "cost_usd": q.estimated_api_cost(review_result)})
         if review_result.error:
             yield _sse({"type": "done", "ok": False})
             return
@@ -421,8 +426,12 @@ async def api_pipeline(req: Request) -> StreamingResponse:
                     "provider": final_result.provider, "model": final_result.model,
                     "answer": final_result.answer, "error": final_result.error,
                     "seconds": round(final_result.seconds, 1), "tokens_in": final_result.tokens_in,
-                    "tokens_out": final_result.tokens_out, "tokens_est": final_result.tokens_est})
-        yield _sse({"type": "done", "ok": not bool(final_result.error)})
+                    "tokens_out": final_result.tokens_out, "tokens_est": final_result.tokens_est,
+                    "cost_usd": q.estimated_api_cost(final_result)})
+        costs = [q.estimated_api_cost(m) for m in (draft_result, review_result, final_result)]
+        yield _sse({"type": "done", "ok": not bool(final_result.error),
+                    "total_cost_usd": sum(c for c in costs if c is not None),
+                    "cost_est": any(m.tokens_est for m in (draft_result, review_result, final_result))})
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -499,6 +508,13 @@ INDEX_HTML = r"""<!doctype html>
   .err { color:var(--err); }
   .ok { color:var(--ok); } .spin { color:var(--dim); }
   .foot { color:var(--dim); font-size:13px; margin-top:8px; }
+  .pipeline-models { margin:0 0 16px; padding:10px 12px; border:1px solid var(--line);
+    border-radius:8px; background:var(--inbg); color:var(--dim); font-size:13px; }
+  .pipeline-models strong { color:var(--txt); }
+  .cost-total { margin-top:16px; padding:16px 18px; border:1px solid var(--ok);
+    border-radius:10px; background:color-mix(in srgb, var(--ok) 10%, var(--panel)); }
+  .cost-total .amount { color:var(--ok); font-size:26px; font-weight:750; line-height:1.15; }
+  .cost-total .foot { margin:5px 0 0; }
   .pipeline-detail > summary { cursor:pointer; list-style:none; }
   .pipeline-detail > summary::-webkit-details-marker { display:none; }
   .pipeline-detail > summary::before { content:'▶'; color:var(--dim); font-size:10px; margin-right:8px; }
@@ -597,6 +613,7 @@ INDEX_HTML = r"""<!doctype html>
   <div class="card">
     <h2 style="margin:0 0 5px;font-size:18px">Research pipeline</h2>
     <div class="foot" style="margin:0 0 16px">Временно: найди свежие данные в Grok вручную и вставь сюда ответ вместе со ссылками. Quorum не использует Grok API.</div>
+    <div id="pipelineModels" class="pipeline-models">Загружаю выбранные модели…</div>
     <label>1. Что нужно подготовить?</label>
     <textarea id="pipeQ" placeholder="Например: подготовь проверенный разбор новости…"></textarea>
     <label style="margin-top:14px">2. Исследование из Grok <span style="font-weight:400">— вставь текст, посты и URL источников</span></label>
@@ -727,6 +744,24 @@ function fmtTok(o){
   if(!ti && !to) return '';
   return ` · in ${ti.toLocaleString()} · out ${to.toLocaleString()} tokens${o.tokens_est?' (~est)':''}`;
 }
+function fmtCost(v){
+  if(typeof v!=='number' || !Number.isFinite(v)) return '';
+  return v<0.01 ? `≈$${v.toFixed(4)}` : `≈$${v.toFixed(2)}`;
+}
+function fmtModel(m){
+  const p=m.pricing;
+  if(!p) return `${m.name}: ${m.model}`;
+  return `${m.name}: <strong>${esc(p.label)}</strong> · $${p.input_per_m}/$${p.output_per_m} за 1M in/out`;
+}
+async function loadPipelineModels(){
+  const box=document.getElementById('pipelineModels');
+  try{
+    const data=await (await fetch('/api/models')).json();
+    const needed=data.panel.filter(m=>m.enabled && (m.provider==='anthropic'||m.provider==='openai'));
+    box.innerHTML='<strong>Модели pipeline:</strong> '+needed.map(fmtModel).join(' &nbsp;•&nbsp; ')+
+      '<div class="foot">Стоимость ниже — оценка эквивалента стандартного API без cache/tool-токенов; фактически Quorum использует CLI-подписки.</div>';
+  }catch(e){ box.textContent='Не удалось загрузить конфигурацию моделей.'; }
+}
 
 const PIPE_LABEL={draft:'1. Claude — полный анализ',review:'2. GPT/Codex — внутренняя проверка',final:'3. Claude — решение для тебя'};
 function grokResearchPrompt(){
@@ -837,7 +872,8 @@ async function runPipeline(){
         } else if(o.type==='stage'){
           const d=cards[o.stage] || card('',o.stage==='final'?'judge':'');
           if(!cards[o.stage]){ cards[o.stage]=d; out.appendChild(d); }
-          const meta=`${esc(o.provider)}/${esc(o.model)} · ${o.seconds}s${fmtTok(o)}`;
+          const cost=fmtCost(o.cost_usd);
+          const meta=`${esc(o.provider)}/${esc(o.model)} · ${o.seconds}s${fmtTok(o)}${cost?' · '+cost:''}`;
           const title=`${esc(PIPE_LABEL[o.stage]||o.stage)} <span class="meta">${meta}</span>`;
           const body=o.error ? `<pre class="err">ERROR: ${esc(o.error)}</pre>` : `<div class="md">${mdToHtml(o.answer)}</div>`;
           if(!o.error && o.stage!=='final'){
@@ -860,6 +896,12 @@ async function runPipeline(){
         } else if(o.type==='done'){
           status.innerHTML=o.ok ? '<span class="banner ok">✓ Final is ready for approval</span>'
             : '<span class="banner err">✗ Pipeline stopped — see the failed stage.</span>';
+          if(o.ok && typeof o.total_cost_usd==='number'){
+            const total=document.createElement('div'); total.className='cost-total';
+            total.innerHTML=`<div>Примерная API-стоимость этого запроса</div><div class="amount">${fmtCost(o.total_cost_usd)}</div>`+
+              `<div class="foot">По отображённым ${o.cost_est?'оценочным':'токенам'} input/output, без cache, web/tool tokens. Через CLI это не отдельное списание.</div>`;
+            out.appendChild(total);
+          }
         }
       }
     }
@@ -1038,6 +1080,7 @@ async function ask(){
 document.getElementById('ask').addEventListener('click',ask);
 document.getElementById('runPipeline').addEventListener('click',runPipeline);
 document.getElementById('copyGrokPrompt').addEventListener('click',copyGrokPrompt);
+loadPipelineModels();
 document.getElementById('addExtra').addEventListener('click',addExtraRow);
 document.getElementById('attachBtn').addEventListener('click',()=>document.getElementById('file').click());
 document.getElementById('file').addEventListener('change',onFiles);

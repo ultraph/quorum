@@ -117,6 +117,34 @@ class Config:
     judge_enabled: bool = True
 
 
+# Standard API list prices, USD per 1M input/output tokens.  CLI calls use
+# subscription auth, so these are deliberately estimates of API-equivalent
+# spend, not an invoice.  `default` is the entitlement-aware Codex selection
+# currently resolving to GPT-5.6 Terra for this account.
+_API_PRICE_ESTIMATES: dict[tuple[str, str], tuple[str, float, float]] = {
+    ("anthropic", "claude-opus-5-5"): ("Claude Opus 5.5", 4.00, 20.00),
+    ("openai", "default"): ("GPT-5.6 Terra (Codex default)", 2.00, 12.00),
+    ("openai", "gpt-5.6-terra"): ("GPT-5.6 Terra", 2.00, 12.00),
+}
+
+
+def api_price_estimate(m: Model) -> dict | None:
+    """Return transparent API-equivalent pricing for UI budget estimates."""
+    item = _API_PRICE_ESTIMATES.get((m.provider, m.model))
+    if item is None:
+        return None
+    label, input_per_m, output_per_m = item
+    return {"label": label, "input_per_m": input_per_m, "output_per_m": output_per_m}
+
+
+def estimated_api_cost(m: Model) -> float | None:
+    price = api_price_estimate(m)
+    if price is None or not (m.tokens_in or m.tokens_out):
+        return None
+    return ((m.tokens_in * price["input_per_m"]) +
+            (m.tokens_out * price["output_per_m"])) / 1_000_000
+
+
 def _resolve_key(raw: str) -> str:
     """Support "env:VAR" (read env), otherwise literal."""
     if raw.startswith("env:"):
