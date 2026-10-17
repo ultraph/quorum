@@ -125,6 +125,7 @@ _API_PRICE_ESTIMATES: dict[tuple[str, str], tuple[str, float, float]] = {
     ("anthropic", "claude-opus-5-5"): ("Claude Opus 5.5", 4.00, 20.00),
     ("openai", "default"): ("GPT-5.6 Terra (Codex default)", 2.00, 12.00),
     ("openai", "gpt-5.6-terra"): ("GPT-5.6 Terra", 2.00, 12.00),
+    ("openai", "gpt-6.1-sol"): ("GPT-6.1 Sol", 2.00, 10.00),
 }
 
 

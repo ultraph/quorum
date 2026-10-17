@@ -320,9 +320,11 @@ appendix, write AT MOST 220 words (source URLs excluded) in exactly this form:
 ## Решение
 One direct verdict and recommended action, in 1–2 sentences.
 
-## Цена
-At most 3 bullets with only the current cost, the decision-relevant estimate or
-range, and the condition that could change it. No table unless the user asks.
+## Ключевые факты
+At most 3 bullets containing only the facts or numbers that determine the
+decision. Use the heading `Цена` instead of `Ключевые факты` ONLY when the user
+explicitly asks about price, cost, budget, or economics. No table unless the
+user asks.
 
 ## Что пока неизвестно
 At most 2 bullets; only uncertainties that could reverse the decision.

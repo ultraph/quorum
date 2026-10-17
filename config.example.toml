@@ -42,7 +42,7 @@ enabled = true
 # [[panel]]
 # name = "gpt"
 # provider = "openai"
-# model = "gpt-5.5"
+# model = "gpt-6.1-sol"
 # auth = "cli"
 # cli_bin = "codex"
 # enabled = true
