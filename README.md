@@ -107,15 +107,27 @@ The primary web workflow is a fact-checking pipeline rather than a vote between
 models. Enter the task, use **Copy prompt for Grok**, then paste Grok's
 structured research packet (including source URLs) into quorum. It then runs:
 
-1. **Claude** opens and checks the supplied sources (and searches for a primary
-   source when needed), then writes a draft;
-2. **GPT/Codex** independently reviews factual support, source quality, and
-   reasoning;
-3. **Claude** verifies material corrections and produces the final text.
+1. **Grok** supplies a manually pasted research packet and source links;
+2. **Claude** opens and checks the supplied sources, then writes a complete
+   internal analysis with calculations and assumptions;
+3. **GPT/Codex** independently checks substantive claims, arithmetic, and
+   decision risks with live web search;
+4. **Claude** applies valid corrections and presents a short decision brief.
+
+The complete Claude analysis and Codex review are collapsed in the UI by
+default. The final stage leads with the recommendation, decision-relevant
+numbers, uncertainties, and the next action; it expands into a long technical
+report only when the user explicitly asks for one.
 
 The manual Grok paste is deliberate: it works without an xAI API key. Claude's
 web access is enabled only for this pipeline; it uses Claude Code's `WebFetch`
 and `WebSearch` tools. You can add revision notes and run the pipeline again.
+When Grok supplies complete EVM addresses, Quorum also queries the configured
+Blockscout API server-side and supplies the raw result to both reviewers. The
+key belongs in a systemd environment file, never in a prompt or Git. Grok owns
+X-post recency/timestamps and promotional-post collection; Claude and Codex
+focus their checks on substantive claims. Addresses must always be full `0x` +
+40 hexadecimal characters; a truncated address is not guessed.
 The old free-form multi-model panel remains available in a collapsed **Ad-hoc
 panel** section.
 

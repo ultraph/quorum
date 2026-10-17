@@ -338,7 +338,7 @@ def _cli_claude(m: Model, prompt: str, web_tools: bool = False) -> str:
     return answer
 
 
-def _cli_codex(m: Model, prompt: str) -> str:
+def _cli_codex(m: Model, prompt: str, web_tools: bool = False) -> str:
     binp = _find_bin("codex", m.cli_bin)
     if not _bin_ok(binp):
         raise RuntimeError("codex CLI not found — install it and log in (`codex login`)")
@@ -349,6 +349,10 @@ def _cli_codex(m: Model, prompt: str) -> str:
         # Do not pass API-only model IDs when config asks for that default.
         if m.model and m.model != "default":
             cmd += ["--model", m.model]
+        if web_tools:
+            # Codex CLI otherwise uses its cached web index by default. Research
+            # reviews need current pages; this stays limited to the pipeline.
+            cmd += ["-c", 'web_search="live"']
         cmd += ["--sandbox", "read-only", "--skip-git-repo-check", "--cd", td,
                 "-o", str(out), "-"]
         p = subprocess.run(
@@ -373,7 +377,7 @@ def call_model(m: Model, prompt: str, web_tools: bool = False) -> str:
         if m.provider == "anthropic":
             return _cli_claude(m, prompt, web_tools)
         if m.provider == "openai":
-            return _cli_codex(m, prompt)
+            return _cli_codex(m, prompt, web_tools)
         raise RuntimeError(f"auth=cli unsupported for provider '{m.provider}'")
     # auth == api
     if m.provider == "anthropic":
