@@ -110,6 +110,7 @@ class Model:
     tokens_in: int = 0       # prompt tokens (exact, from API usage)
     tokens_out: int = 0      # completion tokens
     tokens_est: bool = False # True when counts are a char-based estimate (CLI)
+    cost_usd: float | None = None  # exact billed cost when the provider reports it (xAI)
 
 
 @dataclass
@@ -142,6 +143,8 @@ def api_price_estimate(m: Model) -> dict | None:
 
 
 def estimated_api_cost(m: Model) -> float | None:
+    if m.cost_usd is not None:
+        return m.cost_usd
     price = api_price_estimate(m)
     if price is None or not (m.tokens_in or m.tokens_out):
         return None
@@ -365,6 +368,9 @@ def _responses_call(m: Model, url: str, payload: dict, title: str) -> str:
     m.tokens_in = int(usage.get("input_tokens", 0))
     m.tokens_out = int(usage.get("output_tokens", 0))
     m.tokens_est = False
+    # xAI bills in 1e-10 USD ticks, including cache discounts and search calls.
+    if "cost_in_usd_ticks" in usage:
+        m.cost_usd = int(usage["cost_in_usd_ticks"]) / 1e10
     if out.get("status") != "completed":
         raise RuntimeError(f"{title} API response did not complete")
     answer = "\n".join(block.get("text", "")

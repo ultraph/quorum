@@ -120,7 +120,8 @@ class ConnectionTests(unittest.TestCase):
 
     def test_xai_responses_use_web_and_x_search(self):
         model = q.Model("grok", "xai", "grok-4.7", api_key="test-secret")
-        response = {"status": "completed", "usage": {"input_tokens": 300, "output_tokens": 90},
+        response = {"status": "completed", "usage": {"input_tokens": 300, "output_tokens": 90,
+                                                      "cost_in_usd_ticks": 2894140000},
                     "output": [{"type": "message", "content": [
                         {"type": "output_text", "text": "research"}]}]}
         with patch.object(q, "_http_json", return_value=response) as http:
@@ -128,7 +129,8 @@ class ConnectionTests(unittest.TestCase):
             self.assertEqual(http.call_args.args[0], "https://api.x.ai/v1/responses")
             self.assertEqual(http.call_args.args[1]["tools"], [{"type": "web_search"}, {"type": "x_search"}])
             self.assertEqual(http.call_args.args[2]["Authorization"], "Bearer test-secret")
-        self.assertAlmostEqual(q.estimated_api_cost(model), (300 * 2.00 + 90 * 6.00) / 1_000_000)
+        # Provider-reported cost (incl. searches) wins over the token estimate.
+        self.assertAlmostEqual(q.estimated_api_cost(model), 0.289414)
 
     def test_grok_key_check_and_manual_mode(self):
         class Request:
