@@ -12,12 +12,16 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import base64
 import re
+import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from decimal import Decimal
+from pathlib import Path
 from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
 
@@ -32,23 +36,67 @@ import runs
 app = FastAPI(title="quorum")
 
 _EVM_ADDRESS = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
-_BLOCKSCOUT_BASE = os.environ.get("BLOCKSCOUT_API_BASE", "https://api.blockscout.com/1/api/v2").rstrip("/")
+# Blockscout PRO serves every chain under one key at /<chain id>/api/v2. An
+# older single-chain BLOCKSCOUT_API_BASE (…/4663/api/v2) is reduced to its root.
+_BLOCKSCOUT_ROOT = re.sub(r"/\d+/api/v2/?$", "", os.environ.get("BLOCKSCOUT_API_BASE", "https://api.blockscout.com").rstrip("/"))
+# Chains this API plan serves (probed 18.10.2026); Base and Polygon answer 402.
+_CHAINS = {4663: "Robinhood Chain", 1: "Ethereum", 42161: "Arbitrum One", 10: "OP Mainnet",
+           57073: "Ink", 130: "Unichain", 100: "Gnosis", 534352: "Scroll"}
+_UNCOVERED = {8453: "Base", 137: "Polygon PoS"}
+# Chain hints in links and prose: explorer hosts and "/<chain>/0x…" paths
+# (DexScreener, MemeSwap, Phantom), then plain chain names.
+_CHAIN_HINTS = [
+    (r"robinhoodchain\.blockscout|/robinhood/0x|robinhood chain", 4663),
+    (r"(?<!optimistic\.)etherscan\.io|/ethereum/0x|/eth/0x|ethereum mainnet", 1),
+    (r"arbiscan\.io|/arbitrum/0x|\barbitrum\b", 42161),
+    (r"optimistic\.etherscan|/optimism/0x|op mainnet|\boptimism\b", 10),
+    (r"inkonchain|/ink/0x|\bink chain\b", 57073),
+    (r"uniscan\.xyz|/unichain/0x|\bunichain\b", 130),
+    (r"gnosisscan|/gnosis/0x|/xdai/0x", 100),
+    (r"scrollscan|/scroll/0x", 534352),
+    (r"basescan\.org|/base/0x|\bon base\b|base chain", 8453),
+    (r"polygonscan|/polygon/0x", 137),
+]
 _ROBINHOOD_ASSETS = "https://api.robinhood.com/rhj/assets"
 _ROBINHOOD_RPC = os.environ.get("ROBINHOOD_RPC_URL", "https://rpc.mainnet.chain.robinhood.com")
 
 
-def _blockscout_get(path: str) -> dict:
+def _blockscout_get(chain: int, path: str) -> dict:
     """Read a public Blockscout record without exposing the API key."""
     key = os.environ.get("BLOCKSCOUT_API_KEY", "")
     if not key:
         raise RuntimeError("Blockscout key is not configured")
     query = urllib.parse.urlencode({"apikey": key})
     request = urllib.request.Request(
-        f"{_BLOCKSCOUT_BASE}{path}?{query}",
+        f"{_BLOCKSCOUT_ROOT}/{chain}/api/v2{path}?{query}",
         headers={"Accept": "application/json", "User-Agent": "quorum/1.0"},
     )
-    with urllib.request.urlopen(request, timeout=12) as response:
-        return json.load(response)
+    for attempt in range(3):  # the plan rate-limits bursts with 429
+        try:
+            with urllib.request.urlopen(request, timeout=12) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as exc:
+            if exc.code != 429 or attempt == 2:
+                raise
+            time.sleep(1.5 * (attempt + 1))
+
+
+def _chain_hints(text: str) -> list[int]:
+    low = text.lower()
+    return [chain for pattern, chain in _CHAIN_HINTS if re.search(pattern, low)]
+
+
+def _describe(address: str, chain: int, item: dict) -> str:
+    token = item.get("token") or {}
+    parts = [f"address={item.get('hash', address)}", f"chain={_CHAINS[chain]} ({chain})",
+             f"is_contract={item.get('is_contract', 'unknown')}"]
+    if item.get("name"):
+        parts.append(f"name={item['name']}")
+    if token.get("name") or token.get("symbol"):
+        parts.append("token=" + " ".join(str(x) for x in (token.get("name"), token.get("symbol")) if x))
+    if item.get("coin_balance") is not None:
+        parts.append(f"native_balance_wei={item['coin_balance']}")
+    return "; ".join(parts)
 
 
 def _json_post(url: str, payload: dict) -> dict:
@@ -78,30 +126,55 @@ def _erc20_balance(token: str, holder: str) -> int:
 
 
 def blockchain_evidence(text: str) -> str:
-    """Fetch independently auditable data for complete EVM addresses in research."""
+    """Fetch independently auditable data for complete EVM addresses in research.
+
+    Every address exists on every EVM chain (as an empty wallet), so a lookup
+    only means something on the right chain: use the chain the text names, and
+    without a hint accept only a chain where the address is a contract."""
     addresses = list(dict.fromkeys(a.lower() for a in _EVM_ADDRESS.findall(text)))[:8]
-    rows = []
+    hinted = _chain_hints(text)
+    covered = [c for c in hinted if c in _CHAINS]
+    uncovered = [_UNCOVERED[c] for c in hinted if c in _UNCOVERED]
+    rows, wallets, chains_seen = [], set(), set()
     for address in addresses:
         try:
-            item = _blockscout_get(f"/addresses/{address}")
-            token = item.get("token") or {}
-            parts = [f"address={item.get('hash', address)}", f"is_contract={item.get('is_contract', 'unknown')}"]
-            if item.get("name"):
-                parts.append(f"name={item['name']}")
-            if token.get("name") or token.get("symbol"):
-                parts.append("token=" + " ".join(str(x) for x in (token.get("name"), token.get("symbol")) if x))
-            if item.get("coin_balance") is not None:
-                parts.append(f"native_balance_wei={item['coin_balance']}")
-            rows.append("; ".join(parts))
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, OSError) as exc:
+            if covered:
+                for chain in covered:
+                    item = _blockscout_get(chain, f"/addresses/{address}")
+                    rows.append(_describe(address, chain, item))
+                    chains_seen.add(chain)
+                    if item.get("is_contract") is False:
+                        wallets.add(address)
+                continue
+            if uncovered:
+                # The text names a chain we cannot read; a same-address contract
+                # elsewhere would be a different token, i.e. false evidence.
+                rows.append(f"address={address}; chain={', '.join(uncovered)} (named in the text); "
+                            "result=not checked: this Blockscout plan does not cover that chain")
+                continue
+            for chain in _CHAINS:  # no hint: first chain where it is a contract
+                item = _blockscout_get(chain, f"/addresses/{address}")
+                if item.get("is_contract"):
+                    rows.append(_describe(address, chain, item) + "; chain_inferred=first chain where this address is a contract")
+                    chains_seen.add(chain)
+                    break
+                time.sleep(0.3)
+            else:
+                wallets.add(address)
+                rows.append(f"address={address}; chain=not determined; result=not a contract on "
+                            f"{', '.join(_CHAINS.values())} (a wallet, or a contract on an unchecked chain: "
+                            f"{', '.join(_UNCOVERED.values())})")
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, OSError, RuntimeError) as exc:
             rows.append(f"address={address}; lookup_failed={type(exc).__name__}")
+    if uncovered and covered and addresses:
+        rows.append(f"note: the text also points to {', '.join(uncovered)}, which this Blockscout plan does not cover")
 
     # Robinhood's own registry tells us which contract is canonical. Then the
     # chain's public RPC supplies the ERC-20 balance directly, avoiding the
     # explorer's Cloudflare page and proving holdings rather than repeating a
     # project's self-report.
     robinhood_rows = []
-    if "robinhood" in text.lower():
+    if 4663 in chains_seen or "robinhood" in text.lower():
         try:
             assets = _robinhood_assets()
             mentioned = [a for a in assets if re.search(rf"\b{re.escape(a.get('tokenSymbol', ''))}\b", text)]
@@ -112,7 +185,9 @@ def blockchain_evidence(text: str) -> str:
                 token = deployment["contractAddress"]
                 decimals = int(asset.get("tokenDecimals", 18))
                 robinhood_rows.append(f"official_registry: {asset['tokenSymbol']} canonical_contract={token}; decimals={decimals}")
-                for holder in (a for a in addresses if a.lower() != token.lower()):
+                # Balances only for wallets: a token contract "holding" another
+                # registry stock is noise, not evidence.
+                for holder in (a for a in addresses if a in wallets and a != token.lower()):
                     raw = _erc20_balance(token, holder)
                     amount = Decimal(raw) / (Decimal(10) ** decimals)
                     robinhood_rows.append(f"RPC balanceOf: holder={holder}; token={asset['tokenSymbol']}; amount={amount}; raw={raw}")
@@ -322,7 +397,9 @@ PIPELINE_REVIEW = """\
 You are GPT/Codex, an adversarial internal reviewer. Review the full analysis
 below against the user's request, research notes, and supplied Blockscout evidence.
 You have live web search: check material non-X claims against primary sources
-when needed. Do not rewrite the article. Return a concise, actionable review
+when needed. When SOURCE EXTRACTS are supplied, first check that the draft
+quotes them faithfully (numbers, dates, scope), and search the web only for
+claims the extracts do not cover. Do not rewrite the article. Return a concise, actionable review
 with these headings:
 
 1. **Unsupported or inaccurate claims** — quote or identify the claim and say
@@ -349,6 +426,9 @@ Respond entirely in the user's language. Full EVM addresses must remain full
 === INDEPENDENT BLOCKSCOUT EVIDENCE ===
 {chain_evidence}
 
+=== SOURCE EXTRACTS (verbatim quotes the draft was written from) ===
+{extracts}
+
 === CLAUDE DRAFT ===
 {draft}
 """
@@ -363,7 +443,7 @@ side that cites a primary source; if neither does, present the fact as disputed
 rather than picking one. Do not add facts that are not supported by the
 research notes, the draft, or the review. Treat X posts as leads, not proof,
 unless the linked source itself supports the claim. Omit weak claims or label
-them clearly as unverified. End with a compact **Sources** section containing
+them clearly as unverified. End with a compact sources section containing
 URLs cited in the material below for the facts you keep.
 
 Grok owns all X research. Do not open, search, cite, describe, or mention X
@@ -377,26 +457,34 @@ full (`0x` + 40 hexadecimal characters); if the full address is unavailable,
 say so without guessing or using an ellipsis.
 Write in the user's language unless the request says otherwise.
 
-DEFAULT PRESENTATION POLICY: this is a SHORT DECISION, not an internal report.
+DEFAULT PRESENTATION POLICY: this is a SHORT SUMMARY, not an internal report.
 Unless the user explicitly asks for a detailed/full report, calculations, or an
-appendix, write AT MOST 220 words (source URLs excluded) in exactly this form:
+appendix, write AT MOST 220 words (source URLs excluded) in exactly this form.
+220 is a hard limit: before finishing, count the words, and if you are over,
+drop the least important bullet rather than compressing every sentence.
 
-## Решение
-One direct verdict and recommended action, in 1–2 sentences.
+First heading, chosen by what the user asked:
+- `## Решение` when the user must decide or act (buy, sell, hold, choose,
+  whether to do something): one direct verdict and recommended action.
+- `## Главное` for everything else (news, "what does this mean", explanations,
+  analysis of a post or event): the core takeaway.
+Either way: 1–2 sentences.
 
 ## Ключевые факты
-At most 3 bullets containing only the facts or numbers that determine the
-decision. Use the heading `Цена` instead of `Ключевые факты` ONLY when the user
+At most 3 bullets containing only the facts or numbers that support the first
+section. Use the heading `Цена` instead of `Ключевые факты` ONLY when the user
 explicitly asks about price, cost, budget, or economics. No table unless the
 user asks.
 
 ## Что пока неизвестно
-At most 2 bullets; only uncertainties that could reverse the decision.
+At most 2 bullets; only uncertainties that could change the conclusion.
 
 ## Следующий шаг
-One concrete, smallest safe validation step.
+One concrete, smallest safe step: what to check or watch next.
 
-Then add `### Sources` with at most 3 URLs, taken from the material below, that support the key facts. Do NOT include
+Then add `### Источники` with at most 3 URLs, taken from the material below, that
+support the key facts. Headings follow the user's language (exactly the ones
+above for a Russian request), even when the sources are in English. Do NOT include
 benchmark scores, synthetic examples, cache/tool mechanics, formula derivations,
 long scenario grids, methodology, confidence labels, or an A/B plan with
 substeps. Those belong in the collapsed internal analysis. Do not offer to
@@ -444,6 +532,9 @@ GROK_RESEARCH = """\
 3. Каждый существенный внешний факт сопровождай прямым URL рядом с ним. Если
    источник вторичный, старый, недоступный или противоречивый — отметь это.
    Не выдумывай URL, цитаты, даты, числа или доступ к источнику.
+   Ключевые цифры (цены, капитализация, холдеры, суммы, даты событий)
+   подтверждай двумя независимыми источниками; если нашёлся только один —
+   пометь «один источник». Расхождения между источниками приводи как есть.
 4. Не делай длинных расчётов и не выноси окончательный вердикт. Разрешены
    только простые прозрачные производные величины из входных данных с формулой
    и пометкой «расчёт из входных данных».
@@ -454,8 +545,9 @@ GROK_RESEARCH = """\
    https://x.com/<аккаунт>/status/<ID>; голый ID поста без ссылки не годится.
    Не трать время на точные timestamp поста, если это не цель запроса.
 6. Блокчейн-проверку используй только для крипто/on-chain тем. Для каждого
-   токена, контракта, кошелька, пула или транзакции укажи сеть, назначение и
-   полный идентификатор. EVM-адрес пиши как 0x + 40 hex-символов, без
+   токена, контракта, кошелька, пула или транзакции укажи сеть словами
+   (например Robinhood Chain, Ethereum, Base), назначение, полный идентификатор
+   и, если есть, ссылку на эксплорер. EVM-адрес пиши как 0x + 40 hex-символов, без
    сокращений. Если полного адреса нет — скажи это, не угадывай.
 7. Не добавляй разделы про X, блокчейн, цены API, бенчмарки, право, медицину
    или другие специализированные области, если они не относятся к запросу.
@@ -468,7 +560,8 @@ GROK_RESEARCH = """\
 ## Краткая карта исследования
 3–7 тезисов: что известно и что наиболее важно проверить дальше.
 
-## Проверенные факты
+## Найденные факты
+Это твой пересказ найденного; следующие этапы сверят его с самими страницами.
 Для каждого существенного факта:
 - утверждение;
 - источник и тип источника;
@@ -477,7 +570,7 @@ GROK_RESEARCH = """\
 
 ## Входные данные пользователя и простые расчёты
 Только если пользователь дал цифры или факты, на которых строится задача.
-Отделяй их от внешне проверенных фактов.
+Отделяй их от найденных внешних фактов.
 
 ## Неизвестные и риски
 Только пункты, способные изменить итоговое решение или вывод.
@@ -590,8 +683,9 @@ async def _pipeline_events(question: str, research: str, revision: str, extracts
         yield {"type": "done", "ok": False}
         return
 
-    prompt = PIPELINE_REVIEW.format(question=question, research=research,
-                                    draft=draft_result.answer, chain_evidence=chain_evidence)
+    prompt = PIPELINE_REVIEW.format(
+        question=question, research=research, draft=draft_result.answer, chain_evidence=chain_evidence,
+        extracts="(none: the draft author opened the sources directly)" if reads_itself else extracts)
     yield {"type": "stage_start", "stage": "review", "name": gpt.name,
            "provider": gpt.provider, "model": gpt.model}
     review_result = await loop.run_in_executor(None, q.run_model, gpt, prompt, True)
@@ -623,11 +717,63 @@ LIVE: dict[str, dict] = {}
 TASKS: set[asyncio.Task] = set()
 
 
+MATERIAL_LIMIT = 120_000  # characters of attached material sent to every stage
+
+
+def _clean_attachments(raw) -> list[dict]:
+    """Attached material as [{name, text}], capped so one huge file cannot
+    blow up every stage's prompt (and the API bill)."""
+    out, room = [], MATERIAL_LIMIT
+    for item in (raw if isinstance(raw, list) else [])[:10]:
+        if not isinstance(item, dict) or not isinstance(item.get("text"), str) or room <= 0:
+            continue
+        text = item["text"].strip()
+        if len(text) > room:
+            text = text[:room] + "\n[…материал обрезан: превышен лимит вложений]"
+        room -= len(text)
+        out.append({"name": str(item.get("name") or "файл")[:120], "text": text})
+    return out
+
+
+def _with_material(question: str, attachments: list[dict]) -> str:
+    parts = [question] + [f"=== ПРИЛОЖЕННЫЙ МАТЕРИАЛ: {a['name']} ===\n{a['text']}" for a in attachments]
+    return "\n\n".join(parts)
+
+
+@app.post("/api/extract")
+async def api_extract(req: Request) -> JSONResponse:
+    """PDF → text for attachments (text formats are read in the browser)."""
+    body = await req.json()
+    try:
+        data = base64.b64decode(body.get("data") or "", validate=True)
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "Файл не прочитан."}, status_code=400)
+    if not data.startswith(b"%PDF") or len(data) > 15_000_000:
+        return JSONResponse({"error": "Нужен PDF до 15 МБ."}, status_code=400)
+
+    def extract() -> str:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "in.pdf"
+            path.write_bytes(data)
+            done = subprocess.run(["pdftotext", "-layout", "-enc", "UTF-8", str(path), "-"],
+                                  capture_output=True, timeout=60)
+            if done.returncode != 0:
+                raise RuntimeError("pdftotext failed")
+            return done.stdout.decode("utf-8", errors="replace")
+    try:
+        text = await asyncio.to_thread(extract)
+    except (RuntimeError, subprocess.TimeoutExpired, OSError):
+        return JSONResponse({"error": "Не удалось извлечь текст из PDF."}, status_code=400)
+    if not text.strip():
+        return JSONResponse({"error": "В PDF нет текстового слоя (скан?)."}, status_code=400)
+    return JSONResponse({"text": text})
+
+
 async def _execute(run: dict) -> None:
     try:
         # A revision reuses the parent's research and sees its final answer;
         # the stored "revision" stays the user's own short remark.
-        async for event in _pipeline_events(run["question"],
+        async for event in _pipeline_events(_with_material(run["question"], run.get("attachments", [])),
                                             run.get("reused_research") or run["research"],
                                             run.get("revision_prompt") or run["revision"] or "(none)",
                                             run.get("reused_extracts", "")):
@@ -677,6 +823,7 @@ async def api_pipeline(req: Request) -> StreamingResponse:
         return StreamingResponse(rejected(), media_type="text/event-stream")
     run = runs.new((body.get("question") or "").strip(), (body.get("research") or "").strip(),
                    (body.get("revision") or "").strip())
+    run["attachments"] = _clean_attachments(body.get("attachments"))
     return await _start(run)
 
 
@@ -707,6 +854,7 @@ async def api_revise(run_id: str, req: Request):
         return JSONResponse({"error": "У этого прогона нет готового исследования и финала — запусти его заново."}, status_code=400)
     run = runs.new(parent["question"], parent["research"], remarks)
     run.update(parent=parent["id"], reused_research=research, topic=parent.get("topic", ""),
+               attachments=parent.get("attachments", []),
                revision_prompt=f"{remarks}\n\n=== PREVIOUS FINAL ANSWER (the remarks refer to it) ===\n{final}")
     run["events"].append({"type": "revision", "text": remarks, "parent_created": parent["created"]})
     for stage in ("research", "reader"):
@@ -731,7 +879,8 @@ async def api_run(run_id: str) -> JSONResponse:
     run = _stored_run(run_id)
     if run is None:
         return JSONResponse({"error": "Прогон не найден."}, status_code=404)
-    return JSONResponse({k: run[k] for k in ("id", "created", "question", "research", "revision", "status")})
+    return JSONResponse({**{k: run[k] for k in ("id", "created", "question", "research", "revision", "status")},
+                         "attachments": run.get("attachments", [])})
 
 
 @app.get("/api/runs/{run_id}/stream")
@@ -960,6 +1109,11 @@ INDEX_HTML = r"""<!doctype html>
     <label>1. Что нужно подготовить?</label>
     <textarea id="pipeQ" placeholder="Опиши задачу или выбери пример ниже…"></textarea>
     <div class="chips" id="pipeExamples"></div>
+    <div class="chips">
+      <button type="button" class="chip" id="pipeAttach" title="Статья, PDF, текст — материал получат все этапы">📎 Приложить файл</button>
+      <input type="file" id="pipeFile" multiple hidden accept=".txt,.md,.markdown,.csv,.tsv,.json,.log,.xml,.html,.htm,.pdf">
+      <span id="pipeFiles" class="chips" style="margin:0"></span>
+    </div>
     <div id="grokApiNote" class="foot" style="margin-top:14px">2. Исследование: Grok выполнит его сам через xAI API — поиск в вебе и в X.</div>
     <div id="grokManualBox" hidden>
     <label style="margin-top:14px">2. Исследование из Grok <span style="font-weight:400">— вставь текст, посты и URL источников</span></label>
@@ -1157,6 +1311,45 @@ async function copyGrokPrompt(){
 function pipelineInputs(run){
   document.getElementById('pipeQ').value=run.question||'';
   document.getElementById('grokNotes').value=run.research||'';
+  PIPE_FILES=(run.attachments||[]).map(a=>({name:a.name,text:a.text})); renderPipeFiles();
+}
+// Attached material: text formats read here, PDF converted by the server.
+let PIPE_FILES=[];
+const MATERIAL_LIMIT=120000;
+function renderPipeFiles(){
+  const box=document.getElementById('pipeFiles'); box.innerHTML='';
+  PIPE_FILES.forEach((f,i)=>{
+    const chip=document.createElement('span'); chip.className='chip';
+    chip.textContent='📄 '+f.name+' · '+Math.round(f.text.length/1000)+'K символов ';
+    const del=document.createElement('button'); del.type='button'; del.className='chip'; del.textContent='✕';
+    del.style.padding='0 6px'; del.addEventListener('click',()=>{ PIPE_FILES.splice(i,1); renderPipeFiles(); });
+    chip.appendChild(del); box.appendChild(chip);
+  });
+  const total=PIPE_FILES.reduce((n,f)=>n+f.text.length,0);
+  if(total>MATERIAL_LIMIT){
+    const warn=document.createElement('span'); warn.className='foot'; warn.style.color='var(--err)';
+    warn.textContent='Больше '+MATERIAL_LIMIT/1000+'K символов — лишнее будет обрезано';
+    box.appendChild(warn);
+  }
+}
+async function readPipeFile(f){
+  if(/\.pdf$/i.test(f.name)){
+    const data=await new Promise((ok,fail)=>{ const r=new FileReader();
+      r.onload=()=>ok(String(r.result).split(',')[1]); r.onerror=fail; r.readAsDataURL(f); });
+    const resp=await fetch('/api/extract',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:f.name,data:data})});
+    const d=await resp.json(); if(!resp.ok) throw new Error(d.error||'PDF не прочитан');
+    return d.text;
+  }
+  const raw=await f.text();
+  return /\.html?$/i.test(f.name) ? (new DOMParser().parseFromString(raw,'text/html').body.textContent||'') : raw;
+}
+async function onPipeFiles(ev){
+  const status=document.getElementById('pipelineStatus');
+  for(const f of ev.target.files){
+    try{ PIPE_FILES.push({name:f.name,text:(await readPipeFile(f)).trim()}); status.textContent=''; }
+    catch(e){ status.textContent=f.name+': '+(e.message||e); }
+  }
+  ev.target.value=''; renderPipeFiles();
 }
 function rememberRun(id){
   try{ if(id) localStorage.setItem('lastRun',id); else localStorage.removeItem('lastRun'); }catch(e){}
@@ -1269,7 +1462,7 @@ async function runPipeline(){
   if(!question){ status.textContent='Опиши, что нужно подготовить.'; return; }
   if(GROK_MODE!=='api' && !research){ status.textContent='Сначала вставь исследование из Grok со ссылками.'; return; }
   const resp=fetch('/api/pipeline',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({question:question,research:research})});
+    body:JSON.stringify({question:question,research:research,attachments:PIPE_FILES})});
   status.textContent=GROK_MODE==='api' ? 'Запускаю Grok → Claude → GPT/Codex → Claude…' : 'Запускаю Claude → GPT/Codex → Claude…';
   try{ await followRun(await resp); }
   catch(e){ status.innerHTML=`<span class="banner err">✗ ${esc(String(e.message||e))}</span>`; }
@@ -1346,6 +1539,8 @@ function addCopyActions(cardEl, text, slug){
 
 document.getElementById('runPipeline').addEventListener('click',runPipeline);
 document.getElementById('copyGrokPrompt').addEventListener('click',copyGrokPrompt);
+document.getElementById('pipeAttach').addEventListener('click',()=>document.getElementById('pipeFile').click());
+document.getElementById('pipeFile').addEventListener('change',onPipeFiles);
 document.getElementById('runHistory').addEventListener('change',ev=>{
   if(ev.target.value) openRun(ev.target.value);
   else { rememberRun(''); pipelineInputs({}); document.getElementById('pipelineOut').innerHTML=''; document.getElementById('pipelineStatus').textContent=''; }
@@ -1390,6 +1585,7 @@ themeBtn.addEventListener('click',()=>applyTheme(curTheme()==='light'?'dark':'li
 document.getElementById('home').addEventListener('click', function(){
   // Reset research pipeline (stored runs stay in the history list)
   rememberRun('');
+  PIPE_FILES = []; renderPipeFiles();
   document.getElementById('runHistory').value = '';
   document.getElementById('pipeQ').value = '';
   document.getElementById('grokNotes').value = '';

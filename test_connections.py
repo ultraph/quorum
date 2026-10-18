@@ -300,6 +300,59 @@ class ConnectionTests(unittest.TestCase):
                          "ExampleNews · Решение ФРС")
         self.assertEqual(runs.title("Что нового у xAI?", "Новости xAI"), "Новости xAI")
 
+    def test_onchain_lookup_uses_named_chain_or_contract_only(self):
+        token = "0x2e8c31162b855a2ffa90f6f8634643ad6f111e18"
+        seen = []
+
+        def fake_get(chain, path):
+            seen.append(chain)
+            return {"hash": token, "is_contract": chain == 1, "name": "X" if chain == 1 else None}
+
+        with patch.object(webapp, "_blockscout_get", side_effect=fake_get), \
+             patch.object(webapp.time, "sleep"):
+            named = webapp.blockchain_evidence(f"https://memeswap.fun/t/robinhood/{token}")
+            self.assertEqual(seen, [4663])  # named chain only, nothing else probed
+            self.assertIn("chain=Robinhood Chain (4663)", named)
+            seen.clear()
+            probed = webapp.blockchain_evidence(f"контракт {token}")
+            self.assertEqual(seen, [4663, 1])  # stops at the first chain where it is a contract
+            self.assertIn("chain=Ethereum (1)", probed)
+            seen.clear()
+            base = webapp.blockchain_evidence(f"https://dexscreener.com/base/{token}")
+            self.assertEqual(seen, [])  # Base is not covered: no misleading same-address hit elsewhere
+            self.assertIn("not checked", base)
+
+    def test_attached_material_reaches_every_stage_and_is_capped(self):
+        capped = webapp._clean_attachments([{"name": "a.txt", "text": "x" * (webapp.MATERIAL_LIMIT + 50)},
+                                            {"name": "b.txt", "text": "lost"}, "junk"])
+        self.assertEqual(len(capped), 1)
+        self.assertIn("материал обрезан", capped[0]["text"])
+        claude = q.Model("claude", "anthropic", "claude-opus-5-5", auth="cli")
+        gpt = q.Model("gpt", "openai", "gpt-6.1-sol", auth="cli")
+        grok = q.Model("grok", "xai", "grok-4.7", api_key="test-secret")
+        prompts = []
+
+        def fake_run(m, prompt, web_tools=False):
+            prompts.append(prompt)
+            m.answer = "ok"
+            return m
+
+        class Request:
+            async def json(self):
+                return {"question": "Разбери статью", "attachments": [{"name": "article.pdf", "text": "Секретная цифра 42"}]}
+
+        async def collect():
+            response = await webapp.api_pipeline(Request())
+            return [json.loads(chunk[6:]) async for chunk in response.body_iterator]
+
+        with patch.object(q, "load_config", return_value=SimpleNamespace(panel=[claude, gpt, grok])), \
+             patch.object(q, "run_model", side_effect=fake_run), \
+             patch.object(webapp, "blockchain_evidence", return_value="none"):
+            asyncio.run(collect())
+        self.assertEqual(len(prompts), 4)
+        self.assertTrue(all("ПРИЛОЖЕННЫЙ МАТЕРИАЛ: article.pdf" in p and "Секретная цифра 42" in p for p in prompts))
+        self.assertEqual(runs.recent()[0]["title"], "Разбери статью")  # material stays out of the history label
+
     def test_run_interrupted_by_restart_is_reported(self):
         run = runs.new("вопрос", "", "")
         runs.save(run)  # status "running", but no live task owns it
@@ -336,6 +389,7 @@ class ConnectionTests(unittest.TestCase):
                           ("gpt-6.1-sol", True), ("claude-opus-5-5", False)])
         self.assertIn("quote: 7659,44", calls[1][2])      # Opus works from the extracts
         self.assertIn("You have no web tools", calls[1][2])
+        self.assertIn("quote: 7659,44", calls[2][2])      # GPT reviews against the same extracts
 
         # A revision reuses the reader's extracts instead of paying for them again.
         parent_id = runs.recent()[0]["id"]
