@@ -109,6 +109,15 @@ class ConnectionTests(unittest.TestCase):
             self.assertEqual([t["name"] for t in http.call_args.args[1]["tools"]], ["web_search", "web_fetch"])
             self.assertEqual((m.tokens_in, m.tokens_out, m.tokens_est), (250, 50, False))
 
+    def test_api_refusal_is_reported(self):
+        m = q.Model("claude", "anthropic", "claude-opus-5-5", api_key="test-secret")
+        refusal = {"stop_reason": "refusal", "content": [],
+                   "stop_details": {"type": "refusal", "category": "cyber"},
+                   "usage": {"input_tokens": 10, "output_tokens": 0}}
+        with patch.object(q, "_http_json", return_value=refusal):
+            with self.assertRaisesRegex(RuntimeError, "cyber"):
+                q._api_anthropic(m, "question", True)
+
 
 if __name__ == "__main__":
     unittest.main()

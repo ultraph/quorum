@@ -297,12 +297,15 @@ def _http_json(url: str, payload: dict, headers: dict, timeout: int = 180) -> di
 def _api_anthropic(m: Model, prompt: str, web_tools: bool = False) -> str:
     if not m.api_key:
         raise RuntimeError("no API key (set api_key, e.g. env:ANTHROPIC_API_KEY)")
-    payload = {"model": m.model, "max_tokens": 8192,
+    # Opus 5.5 always thinks and thinking shares max_tokens, so keep headroom.
+    # fallbacks="default": a safety-classifier decline is retried server-side
+    # on the model Anthropic recommends for that refusal category.
+    payload = {"model": m.model, "max_tokens": 16000, "fallbacks": "default",
                "messages": [{"role": "user", "content": prompt}]}
     if web_tools:
         payload["tools"] = [
-            {"type": "web_search_20250305", "name": "web_search"},
-            {"type": "web_fetch_20250910", "name": "web_fetch",
+            {"type": "web_search_20260209", "name": "web_search"},
+            {"type": "web_fetch_20260209", "name": "web_fetch",
              "citations": {"enabled": True}},
         ]
     m.tokens_in = m.tokens_out = 0
@@ -315,6 +318,7 @@ def _api_anthropic(m: Model, prompt: str, web_tools: bool = False) -> str:
         out = _http_json(
             "https://api.anthropic.com/v1/messages", payload,
             {"x-api-key": m.api_key, "anthropic-version": "2023-06-01",
+             "anthropic-beta": "server-side-fallback-2026-07-01",
              "content-type": "application/json"}, timeout=remaining)
         u = out.get("usage") or {}
         m.tokens_in += int(u.get("input_tokens", 0))
@@ -322,6 +326,9 @@ def _api_anthropic(m: Model, prompt: str, web_tools: bool = False) -> str:
         if out.get("stop_reason") != "pause_turn":
             break
         payload["messages"].append({"role": "assistant", "content": out["content"]})
+    if out.get("stop_reason") == "refusal":
+        category = (out.get("stop_details") or {}).get("category") or "unspecified"
+        raise RuntimeError(f"Claude API declined the request (refusal category: {category})")
     if out.get("stop_reason") == "max_tokens":
         raise RuntimeError("Claude API output limit reached; shorten the task and retry")
     return "".join(b.get("text", "") for b in out["content"]
