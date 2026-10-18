@@ -111,7 +111,6 @@ class Model:
     tokens_out: int = 0      # completion tokens
     tokens_est: bool = False # True when counts are a char-based estimate (CLI)
     cost_usd: float | None = None  # exact billed cost when the provider reports it (xAI)
-    x_search: bool = True    # xAI only: allow the paid X search tool on web-tool runs
 
 
 @dataclass
@@ -353,7 +352,9 @@ def _api_openai_responses(m: Model, prompt: str, web_tools: bool = False) -> str
     return _responses_call(m, "https://api.openai.com/v1/responses", payload, "OpenAI")
 
 
-XAI_MAX_TURNS = 5
+# A turn may run several searches in parallel, so this is a runaway guard,
+# not a precise budget (measured 18.10.2026: 2 turns still made 11 searches).
+XAI_MAX_TURNS = 3
 
 
 def _api_xai_responses(m: Model, prompt: str, web_tools: bool = False) -> str:
@@ -362,9 +363,7 @@ def _api_xai_responses(m: Model, prompt: str, web_tools: bool = False) -> str:
         raise RuntimeError("no xAI API key")
     payload = {"model": m.model, "input": prompt, "store": False}
     if web_tools:
-        payload["tools"] = [{"type": "web_search"}]
-        if m.x_search:
-            payload["tools"].append({"type": "x_search"})
+        payload["tools"] = [{"type": "web_search"}, {"type": "x_search"}]
         # Every search round re-reads the whole growing context, and X posts are
         # billed per item fetched, so cap the server-side tool rounds.
         payload["max_turns"] = XAI_MAX_TURNS

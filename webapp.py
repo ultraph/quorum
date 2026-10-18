@@ -509,12 +509,9 @@ GROK_RESEARCH = """\
 """
 
 
-def grok_research_prompt(question: str, x_search: bool = True) -> str:
-    prompt = GROK_RESEARCH.format(today=time.strftime("%d.%m.%Y"),
-                                  question=question or "[вставь тему или вопрос]")
-    if not x_search:
-        prompt += "\nВ этом запуске поиск по X отключён: используй только веб и не выводи раздел про X.\n"
-    return prompt
+def grok_research_prompt(question: str) -> str:
+    return GROK_RESEARCH.format(today=time.strftime("%d.%m.%Y"),
+                                question=question or "[вставь тему или вопрос]")
 
 
 @app.post("/api/grok_prompt")
@@ -539,7 +536,6 @@ async def api_pipeline(req: Request) -> StreamingResponse:
     question = (body.get("question") or "").strip()
     research = (body.get("research") or "").strip()
     revision = (body.get("revision") or "").strip() or "(none)"
-    x_search = body.get("x_search") is True
 
     async def gen():
         nonlocal research
@@ -567,9 +563,8 @@ async def api_pipeline(req: Request) -> StreamingResponse:
                 return
             yield _sse({"type": "stage_start", "stage": "research", "name": grok.name,
                         "provider": grok.provider, "model": grok.model})
-            grok.x_search = x_search
             research_result = await loop.run_in_executor(
-                None, q.run_model, grok, grok_research_prompt(question, x_search), True)
+                None, q.run_model, grok, grok_research_prompt(question), True)
             stages.append(research_result)
             yield _sse(_stage_event("research", research_result))
             if research_result.error:
@@ -892,10 +887,7 @@ INDEX_HTML = r"""<!doctype html>
     </details>
     <label>1. Что нужно подготовить?</label>
     <textarea id="pipeQ" placeholder="Например: подготовь проверенный разбор новости…"></textarea>
-    <div id="grokApiNote" style="margin-top:14px">
-      <div class="foot">2. Исследование: Grok выполнит его сам через xAI API (веб-поиск всегда).</div>
-      <label class="chk" style="display:inline-flex;margin-top:6px"><input type="checkbox" id="grokXSearch"> Искать и в X <span style="color:var(--dim);font-size:12px">— для новостей, реакций и постов; заметно дороже</span></label>
-    </div>
+    <div id="grokApiNote" class="foot" style="margin-top:14px">2. Исследование: Grok выполнит его сам через xAI API — поиск в вебе и в X.</div>
     <div id="grokManualBox" hidden>
     <label style="margin-top:14px">2. Исследование из Grok <span style="font-weight:400">— вставь текст, посты и URL источников</span></label>
     <div class="foot" style="margin:-2px 0 8px">Сначала скопируй готовый запрос в Grok; его ответ уже будет пригоден для вставки сюда.</div>
@@ -1128,8 +1120,7 @@ async function runPipeline(){
   const cards={};
   try{
     const resp=await fetch('/api/pipeline',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({question:question,research:research,revision:revision,
-        x_search:document.getElementById('grokXSearch').checked})});
+      body:JSON.stringify({question:question,research:research,revision:revision})});
     if(!resp.ok || !resp.body) throw new Error('Pipeline request failed ('+resp.status+')');
     const reader=resp.body.getReader(), dec=new TextDecoder(); let buf='';
     while(true){

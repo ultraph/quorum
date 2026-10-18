@@ -130,9 +130,6 @@ class ConnectionTests(unittest.TestCase):
             self.assertEqual(http.call_args.args[1]["tools"], [{"type": "web_search"}, {"type": "x_search"}])
             self.assertEqual(http.call_args.args[2]["Authorization"], "Bearer test-secret")
             self.assertEqual(http.call_args.args[1]["max_turns"], q.XAI_MAX_TURNS)
-            model.x_search = False
-            q.call_model(model, "question", True)
-            self.assertEqual(http.call_args.args[1]["tools"], [{"type": "web_search"}])
         # Provider-reported cost (incl. searches) wins over the token estimate.
         self.assertAlmostEqual(q.estimated_api_cost(model), 0.289414)
 
@@ -188,8 +185,6 @@ class ConnectionTests(unittest.TestCase):
         stages = [e["stage"] for e in events if e["type"] == "stage"]
         self.assertEqual(stages, ["research", "draft", "review", "final"])
         self.assertIn("Что нового?", prompts["xai"][0])
-        self.assertFalse(grok.x_search)  # X search is opt-in per run
-        self.assertIn("поиск по X отключён", prompts["xai"][0])
         self.assertIn("xai answer", prompts["anthropic"][0])
         self.assertTrue(events[-1]["ok"])
 
