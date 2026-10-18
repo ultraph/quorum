@@ -10,3 +10,6 @@ __pycache__/
 # local virtualenv (see README venv workaround)
 .venv/
 venv/
+# assistant-local files
+CLAUDE.local.md
+.claude/
