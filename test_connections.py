@@ -180,9 +180,11 @@ class ConnectionTests(unittest.TestCase):
         gpt = q.Model("gpt", "openai", "gpt-6.1-sol", auth="cli")
         grok = q.Model("grok", "xai", "grok-4.7", api_key="test-secret")
         prompts = {}
+        tools = []
 
         def fake_run(m, prompt, web_tools=False):
             prompts[m.provider] = prompts.get(m.provider, []) + [prompt]
+            tools.append(web_tools)
             m.answer = f"{m.provider} answer"
             return m
 
@@ -200,6 +202,7 @@ class ConnectionTests(unittest.TestCase):
             events = asyncio.run(collect())
         stages = [e["stage"] for e in events if e["type"] == "stage"]
         self.assertEqual(stages, ["research", "draft", "review", "final"])
+        self.assertEqual(tools, [True, True, True, False])  # final works without web tools
         # No full EVM address in the text → no Blockscout status message.
         self.assertFalse([e for e in events if e["type"] == "info"])
         self.assertIn("Что нового?", prompts["xai"][0])
