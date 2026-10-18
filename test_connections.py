@@ -196,6 +196,8 @@ class ConnectionTests(unittest.TestCase):
             events = asyncio.run(collect())
         stages = [e["stage"] for e in events if e["type"] == "stage"]
         self.assertEqual(stages, ["research", "draft", "review", "final"])
+        # No full EVM address in the text → no Blockscout status message.
+        self.assertFalse([e for e in events if e["type"] == "info"])
         self.assertIn("Что нового?", prompts["xai"][0])
         self.assertIn("xai answer", prompts["anthropic"][0])
         self.assertTrue(events[-1]["ok"])

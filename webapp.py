@@ -504,7 +504,8 @@ async def _pipeline_events(question: str, research: str, revision: str):
             return
         research = research_result.answer
 
-    yield {"type": "info", "message": "Проверяю полные EVM-адреса через Blockscout…"}
+    if _EVM_ADDRESS.search(f"{question}\n{research}"):
+        yield {"type": "info", "message": "Проверяю полные EVM-адреса через Blockscout…"}
     chain_evidence = await loop.run_in_executor(
         None, blockchain_evidence, f"{question}\n{research}")
 
@@ -1104,6 +1105,7 @@ async function followRun(resp){
         } else if(o.type==='revision'){
           out.appendChild(card(`<div class="foot">✎ Доработка прогона от ${esc(o.parent_created)}</div><div>${esc(o.text)}</div>`));
         } else if(o.type==='stage_start'){
+          status.className='foot'; status.textContent='Сейчас работает: '+(PIPE_LABEL[o.stage]||o.stage)+'…';
           const d=card(`<h3>${esc(PIPE_LABEL[o.stage]||o.stage)}</h3><pre class="spin">${esc(o.name)} is working<span class="dots"></span></pre>`,o.stage==='final'?'judge':'');
           cards[o.stage]=d; out.appendChild(d);
         } else if(o.type==='stage'){
