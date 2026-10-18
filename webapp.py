@@ -1257,7 +1257,7 @@ async function loadRunHistory(selected){
     const data=await (await fetch('/api/runs')).json();
     sel.innerHTML='<option value="">— новый прогон —</option>'+data.runs.map(r=>{
       const mark=(r.status==='running'?'⏳ ':r.ok?'✓ ':'✗ ')+(r.parent?'✎ ':'');
-      return `<option value="${esc(r.id)}">${mark}${esc(r.created)} · ${esc(r.question.slice(0,70))}</option>`;
+      return `<option value="${esc(r.id)}">${mark}${esc(r.title.length>80 ? r.title.slice(0,80).trim()+'…' : r.title)} · ${esc(r.created)}</option>`;
     }).join('');
     sel.value=selected||'';
   }catch(e){}

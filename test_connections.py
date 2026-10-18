@@ -202,7 +202,7 @@ class ConnectionTests(unittest.TestCase):
 
         # A page reload re-attaches to the stored run and replays the same log.
         stored = runs.recent()
-        self.assertEqual([(r["status"], r["ok"], r["question"]) for r in stored], [("done", True, "Что нового?")])
+        self.assertEqual([(r["status"], r["ok"], r["title"]) for r in stored], [("done", True, "Что нового?")])
 
         async def replay():
             response = await webapp.api_run_stream(stored[0]["id"])
@@ -255,6 +255,12 @@ class ConnectionTests(unittest.TestCase):
         self.assertTrue(events[-1]["ok"])
         child = [r for r in runs.recent() if r["parent"]]
         self.assertEqual(child[0]["parent"], parent["id"])
+
+    def test_history_title_shortens_links(self):
+        self.assertEqual(runs.title("https://x.com/KobeissiLetter/status/2111679803560796451\n\nПризывы к «Черному понедельнику»"),
+                         "KobeissiLetter · Призывы к «Черному понедельнику»")
+        self.assertEqual(runs.title("что тут? https://x.com/xai/status/1"), "что тут? xai")
+        self.assertEqual(runs.title("см. https://www.coindesk.com/markets/2026/10/18/x что это?"), "см. coindesk.com что это?")
 
     def test_run_interrupted_by_restart_is_reported(self):
         run = runs.new("вопрос", "", "")

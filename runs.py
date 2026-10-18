@@ -2,11 +2,21 @@
 page reloads and service restarts. Single-user installation, no database."""
 import json
 import os
+import re
 import tempfile
 import time
 from pathlib import Path
 
 KEEP = 200  # newest runs kept on disk
+_X_POST = re.compile(r"https?://(?:www\.)?(?:x|twitter)\.com/(\w+)\S*")
+_URL = re.compile(r"https?://(?:www\.)?([^/\s]+)\S*")
+
+
+def title(question: str) -> str:
+    """History label: an X link becomes just the account name, other links
+    their domain, so the gist of the question fits on one line."""
+    text = _URL.sub(r"\1", _X_POST.sub(r"\1 ·", question))
+    return " ".join(text.split()).strip(" ·")[:100]
 
 
 def runs_dir() -> Path:
@@ -53,6 +63,6 @@ def recent(limit: int = 30) -> list[dict]:
             run = json.loads(path.read_text())
         except (OSError, ValueError):
             continue
-        out.append({"id": run["id"], "created": run["created"], "question": run["question"][:120],
+        out.append({"id": run["id"], "created": run["created"], "title": title(run["question"]),
                     "status": run["status"], "ok": run["ok"], "parent": run.get("parent")})
     return out
