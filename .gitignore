@@ -2,6 +2,7 @@
 config.toml
 *.local.toml
 .env
+connections.local.json
 # transcripts / scratch
 *.md.out
 __pycache__/

@@ -28,6 +28,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import connections
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -101,6 +102,7 @@ class Model:
     api_key: str = ""        # resolved key (api mode)
     cli_bin: str = ""        # binary name/path (cli mode)
     enabled: bool = True
+    subscription: str = ""   # user-declared plan label; not an auth-status check
     # result:
     answer: str = ""
     error: str = ""
@@ -160,6 +162,7 @@ def _model_from_table(t: dict) -> Model:
         api_key=_resolve_key(t.get("api_key", "")),
         cli_bin=t.get("cli_bin", ""),
         enabled=t.get("enabled", True),
+        subscription=t.get("subscription", ""),
     )
 
 
@@ -264,6 +267,12 @@ def load_config() -> Config:
     with open(CONFIG_PATH, "rb") as f:
         raw = _load_toml(f)
     panel = [_model_from_table(t) for t in raw.get("panel", [])]
+    overrides = connections.read(CONFIG_PATH)
+    for m in panel:
+        override = overrides.get(m.provider, {})
+        if m.provider in ("anthropic", "openai"):
+            m.auth = override.get("auth", m.auth)
+            m.api_key = override.get("api_key", m.api_key)
     jt = raw.get("judge", {})
     judge_enabled = jt.get("enabled", True)
     judge = None
@@ -285,19 +294,64 @@ def _http_json(url: str, payload: dict, headers: dict, timeout: int = 180) -> di
         return json.loads(r.read().decode())
 
 
-def _api_anthropic(m: Model, prompt: str) -> str:
+def _api_anthropic(m: Model, prompt: str, web_tools: bool = False) -> str:
     if not m.api_key:
         raise RuntimeError("no API key (set api_key, e.g. env:ANTHROPIC_API_KEY)")
-    out = _http_json(
-        "https://api.anthropic.com/v1/messages",
-        {"model": m.model, "max_tokens": 4096,
-         "messages": [{"role": "user", "content": prompt}]},
-        {"x-api-key": m.api_key, "anthropic-version": "2023-06-01",
-         "content-type": "application/json"})
-    u = out.get("usage") or {}
-    m.tokens_in, m.tokens_out = int(u.get("input_tokens", 0)), int(u.get("output_tokens", 0))
+    payload = {"model": m.model, "max_tokens": 8192,
+               "messages": [{"role": "user", "content": prompt}]}
+    if web_tools:
+        payload["tools"] = [
+            {"type": "web_search_20250305", "name": "web_search"},
+            {"type": "web_fetch_20250910", "name": "web_fetch",
+             "citations": {"enabled": True}},
+        ]
+    m.tokens_in = m.tokens_out = 0
+    m.tokens_est = False
+    deadline = time.monotonic() + 420
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Claude API research timed out")
+        out = _http_json(
+            "https://api.anthropic.com/v1/messages", payload,
+            {"x-api-key": m.api_key, "anthropic-version": "2023-06-01",
+             "content-type": "application/json"}, timeout=remaining)
+        u = out.get("usage") or {}
+        m.tokens_in += int(u.get("input_tokens", 0))
+        m.tokens_out += int(u.get("output_tokens", 0))
+        if out.get("stop_reason") != "pause_turn":
+            break
+        payload["messages"].append({"role": "assistant", "content": out["content"]})
+    if out.get("stop_reason") == "max_tokens":
+        raise RuntimeError("Claude API output limit reached; shorten the task and retry")
     return "".join(b.get("text", "") for b in out["content"]
                    if b.get("type") == "text").strip()
+
+
+def _api_openai_responses(m: Model, prompt: str, web_tools: bool = False) -> str:
+    if not m.api_key:
+        raise RuntimeError("no OpenAI API key")
+    if m.model == "default":
+        raise RuntimeError("Choose an explicit model ID before using OpenAI API")
+    payload = {"model": m.model, "input": prompt, "store": False,
+               "reasoning": {"effort": "medium"}}
+    if web_tools:
+        payload["tools"] = [{"type": "web_search"}]
+    out = _http_json("https://api.openai.com/v1/responses", payload,
+                     {"Authorization": f"Bearer {m.api_key}",
+                      "Content-Type": "application/json"}, timeout=420)
+    usage = out.get("usage") or {}
+    m.tokens_in = int(usage.get("input_tokens", 0))
+    m.tokens_out = int(usage.get("output_tokens", 0))
+    m.tokens_est = False
+    if out.get("status") != "completed":
+        raise RuntimeError("OpenAI API response did not complete")
+    answer = "\n".join(block.get("text", "")
+                       for item in out.get("output", []) if item.get("type") == "message"
+                       for block in item.get("content", []) if block.get("type") == "output_text").strip()
+    if not answer:
+        raise RuntimeError("OpenAI API returned no text")
+    return answer
 
 
 def _api_openai_compatible(m: Model, prompt: str, base: str) -> str:
@@ -410,9 +464,9 @@ def call_model(m: Model, prompt: str, web_tools: bool = False) -> str:
         raise RuntimeError(f"auth=cli unsupported for provider '{m.provider}'")
     # auth == api
     if m.provider == "anthropic":
-        return _api_anthropic(m, prompt)
+        return _api_anthropic(m, prompt, web_tools)
     if m.provider == "openai":
-        return _api_openai_compatible(m, prompt, "https://api.openai.com/v1")
+        return _api_openai_responses(m, prompt, web_tools)
     if m.provider == "deepseek":
         return _api_openai_compatible(m, prompt, "https://api.deepseek.com")
     if m.provider == "gemini":

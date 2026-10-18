@@ -17,12 +17,15 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from decimal import Decimal
+from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 import quorum as q
+from account_status import account_status
+import connections
 
 app = FastAPI(title="quorum")
 
@@ -137,12 +140,77 @@ def api_models() -> JSONResponse:
     def item(m: q.Model) -> dict:
         return {"name": m.name, "provider": m.provider, "model": m.model,
                 "auth": m.auth, "enabled": m.enabled,
+                "subscription": m.subscription,
+                "has_api_key": bool(m.api_key),
+                "account": account_status(m.provider, q._find_bin(
+                    "claude" if m.provider == "anthropic" else "codex", m.cli_bin))
+                    if m.auth == "cli" and m.provider in ("anthropic", "openai") else None,
                 "pricing": q.api_price_estimate(m)}
     return JSONResponse({
         "panel": [item(m) for m in cfg.panel],
         "judge": cfg.judge.name if cfg.judge else None,
         "judge_enabled": cfg.judge_enabled,
     })
+
+
+@app.post("/api/connections/claude")
+async def claude_connection(req: Request) -> JSONResponse:
+    return await update_connection(req, "anthropic")
+
+
+@app.post("/api/connections/gpt")
+async def gpt_connection(req: Request) -> JSONResponse:
+    return await update_connection(req, "openai")
+
+
+async def update_connection(req: Request, provider: str) -> JSONResponse:
+    title = "Anthropic" if provider == "anthropic" else "OpenAI"
+    binary = "claude" if provider == "anthropic" else "codex"
+    # JSON-only, same-origin writes. Never echo keys or upstream error bodies.
+    origin = req.headers.get("origin")
+    if (origin and urllib.parse.urlsplit(origin).netloc != req.headers.get("host")) or not req.headers.get("content-type", "").startswith("application/json"):
+        return JSONResponse({"error": "Запрос должен исходить из интерфейса Quorum."}, status_code=403)
+    body = await req.json()
+    auth = body.get("auth")
+    if auth not in ("cli", "api"):
+        return JSONResponse({"error": "Выберите подписку или API."}, status_code=400)
+    cfg = q.load_config()
+    model = next((m for m in cfg.panel if m.provider == provider), None)
+    if not model:
+        return JSONResponse({"error": f"{title} не настроен."}, status_code=400)
+    raw_key = body.get("api_key", "")
+    if not isinstance(raw_key, str) or len(raw_key) > 4096:
+        return JSONResponse({"error": "Некорректный ключ."}, status_code=400)
+    key = raw_key.strip() or model.api_key
+    remove = body.get("remove_key") is True
+    if remove and auth != "cli":
+        return JSONResponse({"error": "Перед удалением ключа выберите подписку."}, status_code=400)
+    if auth == "api":
+        if not key or any(c.isspace() for c in key):
+            return JSONResponse({"error": f"Введите {title} API key."}, status_code=400)
+        if provider == "openai" and model.model == "default":
+            return JSONResponse({"error": "Для OpenAI API нужен явный ID модели вместо default."}, status_code=400)
+        def verify():
+            base = "https://api.anthropic.com/v1/models/" if provider == "anthropic" else "https://api.openai.com/v1/models/"
+            headers = {"x-api-key": key, "anthropic-version": "2023-06-01"} if provider == "anthropic" else {"Authorization": f"Bearer {key}"}
+            request = urllib.request.Request(base + urllib.parse.quote(model.model, safe=""), headers=headers)
+            with urllib.request.urlopen(request, timeout=15) as response:
+                json.load(response)
+        try:
+            await asyncio.to_thread(verify)
+        except urllib.error.HTTPError as exc:
+            return JSONResponse({"error": f"{title} API: HTTP {exc.code}. Проверьте ключ и доступ к модели."}, status_code=400)
+        except (OSError, ValueError):
+            return JSONResponse({"error": f"Не удалось связаться с {title} API."}, status_code=502)
+    else:
+        status = await asyncio.to_thread(account_status, provider, q._find_bin(binary, model.cli_bin))
+        if status.get("status") != "signed_in" or status.get("mode") != "subscription":
+            return JSONResponse({"error": f"В {binary} нет подтверждённого входа через подписку. Выполните вход на сервере."}, status_code=400)
+    if body.get("test_only") is True:
+        return JSONResponse({"message": "Ключ и доступ к модели проверены. Запуск модели и баланс кредитов не проверялись." if auth == "api" else "Вход через подписку подтверждён."})
+    await asyncio.to_thread(connections.save_claude, q.CONFIG_PATH, auth,
+                            key if auth == "api" else None, remove, provider)
+    return JSONResponse({"message": "Подключение сохранено. Применится к следующему запуску."})
 
 
 @app.post("/api/ask")
@@ -423,7 +491,7 @@ async def api_pipeline(req: Request) -> StreamingResponse:
                                        revision=revision, chain_evidence=chain_evidence)
         yield _sse({"type": "stage_start", "stage": "final", "name": claude.name,
                     "provider": claude.provider, "model": claude.model})
-        final_result = await loop.run_in_executor(None, q.run_model, claude, prompt, True)
+        final_result = await loop.run_in_executor(None, q.run_model, replace(claude), prompt, True)
         yield _sse({"type": "stage", "stage": "final", "name": final_result.name,
                     "provider": final_result.provider, "model": final_result.model,
                     "answer": final_result.answer, "error": final_result.error,
@@ -612,28 +680,8 @@ INDEX_HTML = r"""<!doctype html>
   <button id="theme" class="theme" title="Toggle light / dark theme">🌙</button>
 </header>
 <main>
-  <div class="card">
-    <h2 style="margin:0 0 5px;font-size:18px">Research pipeline</h2>
-    <div class="foot" style="margin:0 0 16px">Временно: найди свежие данные в Grok вручную и вставь сюда ответ вместе со ссылками. Quorum не использует Grok API.</div>
-    <div id="pipelineModels" class="pipeline-models">Загружаю выбранные модели…</div>
-    <label>1. Что нужно подготовить?</label>
-    <textarea id="pipeQ" placeholder="Например: подготовь проверенный разбор новости…"></textarea>
-    <label style="margin-top:14px">2. Исследование из Grok <span style="font-weight:400">— вставь текст, посты и URL источников</span></label>
-    <div class="foot" style="margin:-2px 0 8px">Сначала скопируй готовый запрос в Grok; его ответ уже будет пригоден для вставки сюда.</div>
-    <button type="button" id="copyGrokPrompt" class="ghost">📋 Copy prompt for Grok</button>
-    <textarea id="grokNotes" style="min-height:180px" placeholder="Вставь сюда результат поиска Grok. Сохраняй ссылки, даты и цитаты — они пойдут автору и фактчекеру."></textarea>
-    <label style="margin-top:14px">3. Что исправить в следующей версии? <span style="font-weight:400">— необязательно</span></label>
-    <textarea id="revisionNotes" style="min-height:70px" placeholder="Например: сократи до 500 слов, проверь цифру из второго источника, добавь контекст…"></textarea>
-    <div class="row" style="margin-top:14px">
-      <span class="foot">Claude проверяет источники → GPT/Codex делает ревью → Claude готовит финал</span>
-      <div style="margin-left:auto"><button id="runPipeline">Run pipeline</button></div>
-    </div>
-    <div class="foot" id="pipelineStatus"></div>
-  </div>
-  <div id="pipelineOut"></div>
-
-  <details class="card">
-    <summary><span class="name">Ad-hoc panel</span><span class="meta">старый режим: разовый вопрос нескольким моделям</span></summary>
+  <details class="card" id="adhocPanel">
+    <summary><span class="name">Ad-hoc panel</span><span class="meta">разовый вопрос нескольким моделям</span></summary>
     <div style="padding:0 16px 16px">
     <label>Question</label>
     <textarea id="q" placeholder="Ask anything…"></textarea>
@@ -656,6 +704,72 @@ INDEX_HTML = r"""<!doctype html>
     </div>
   </details>
   <div id="out"></div>
+  <div class="card">
+    <h2 style="margin:0 0 5px;font-size:18px">Research pipeline</h2>
+    <div class="foot" style="margin:0 0 16px">Временно: найди свежие данные в Grok вручную и вставь сюда ответ вместе со ссылками. Quorum не использует Grok API.</div>
+    <div id="pipelineModels" class="pipeline-models">Загружаю выбранные модели…</div>
+    <details class="pipeline-models" id="connectionSettings">
+      <summary style="cursor:pointer">Подключение Claude: подписка / API</summary>
+      <div style="margin-top:12px">
+        <label for="claudeAuth">Способ подключения</label>
+        <select id="claudeAuth">
+          <option value="cli">Подписка Claude · Claude Code CLI</option>
+          <option value="api">Anthropic API · оплата по токенам</option>
+        </select>
+        <div id="claudeKeyBox" style="margin-top:10px" hidden>
+          <label for="claudeApiKey">Anthropic API key</label>
+          <input id="claudeApiKey" type="password" autocomplete="new-password" placeholder="Введите ключ; оставьте пустым, чтобы использовать сохранённый" style="width:100%">
+          <div class="foot" id="claudeKeyState"></div>
+          <div class="foot">API оплачивается отдельно от подписки. Web search и токены источников могут увеличить счёт.</div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button type="button" id="testClaudeConnection" class="ghost">Проверить подключение</button>
+          <button type="button" id="saveClaudeConnection">Сохранить</button>
+          <button type="button" id="removeClaudeKey" class="ghost">Удалить сохранённый API key</button>
+        </div>
+        <div class="foot" id="claudeConnectionStatus" role="status"></div>
+        <div class="foot">Модель сохраняется. Изменение действует со следующего запуска и общее для этой установки Quorum.</div>
+      </div>
+    </details>
+    <details class="pipeline-models" id="gptConnectionSettings">
+      <summary style="cursor:pointer">Подключение GPT / Codex: подписка / API</summary>
+      <div style="margin-top:12px">
+        <label for="gptAuth">Способ подключения</label>
+        <select id="gptAuth">
+          <option value="cli">Подписка ChatGPT · Codex CLI</option>
+          <option value="api">OpenAI API · оплата по токенам</option>
+        </select>
+        <div id="gptKeyBox" style="margin-top:10px" hidden>
+          <label for="gptApiKey">OpenAI API key</label>
+          <input id="gptApiKey" type="password" autocomplete="new-password" placeholder="Введите ключ; оставьте пустым, чтобы использовать сохранённый" style="width:100%">
+          <div class="foot" id="gptKeyState"></div>
+          <div class="foot">API оплачивается отдельно от подписки ChatGPT. Веб-поиск может увеличить счёт.</div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button type="button" id="testGptConnection" class="ghost">Проверить подключение</button>
+          <button type="button" id="saveGptConnection">Сохранить</button>
+          <button type="button" id="removeGptKey" class="ghost">Удалить сохранённый API key</button>
+        </div>
+        <div class="foot" id="gptConnectionStatus" role="status"></div>
+        <div class="foot">Модель сохраняется. Изменение действует со следующего запуска и общее для этой установки Quorum.</div>
+      </div>
+    </details>
+    <label>1. Что нужно подготовить?</label>
+    <textarea id="pipeQ" placeholder="Например: подготовь проверенный разбор новости…"></textarea>
+    <label style="margin-top:14px">2. Исследование из Grok <span style="font-weight:400">— вставь текст, посты и URL источников</span></label>
+    <div class="foot" style="margin:-2px 0 8px">Сначала скопируй готовый запрос в Grok; его ответ уже будет пригоден для вставки сюда.</div>
+    <button type="button" id="copyGrokPrompt" class="ghost">📋 Copy prompt for Grok</button>
+    <textarea id="grokNotes" style="min-height:180px" placeholder="Вставь сюда результат поиска Grok. Сохраняй ссылки, даты и цитаты — они пойдут автору и фактчекеру."></textarea>
+    <label style="margin-top:14px">3. Что исправить в следующей версии? <span style="font-weight:400">— необязательно</span></label>
+    <textarea id="revisionNotes" style="min-height:70px" placeholder="Например: сократи до 500 слов, проверь цифру из второго источника, добавь контекст…"></textarea>
+    <div class="row" style="margin-top:14px">
+      <span class="foot">Claude проверяет источники → GPT/Codex делает ревью → Claude готовит финал</span>
+      <div style="margin-left:auto"><button id="runPipeline">Run pipeline</button></div>
+    </div>
+    <div class="foot" id="pipelineStatus"></div>
+  </div>
+  <div id="pipelineOut"></div>
+
 </main>
 <script>
 let MODELS = [];
@@ -752,17 +866,72 @@ function fmtCost(v){
 }
 function fmtModel(m){
   const p=m.pricing;
-  if(!p) return `${m.name}: ${m.model}`;
-  return `${m.name}: <strong>${esc(p.label)}</strong> · $${p.input_per_m}/$${p.output_per_m} за 1M in/out`;
+  const a=m.account || {}, service=m.provider==='anthropic' ? 'Claude' : 'ChatGPT';
+  const cli=m.provider==='anthropic' ? 'Claude Code CLI' : 'Codex CLI';
+  let auth='Через API · оплата по токенам';
+  if(m.auth==='cli'){
+    if(a.status==='signed_out') auth=`${cli} · требуется вход`;
+    else if(a.status==='signed_in'){
+      if(a.mode==='api') auth=`${cli} · вход по API-ключу`;
+      else auth=`Через подписку ${service}${a.plan?' '+a.plan.charAt(0).toUpperCase()+a.plan.slice(1):' (тариф не сообщён)'} · ${cli} · вход подтверждён`;
+    } else auth=`${cli} · не удалось проверить вход${m.subscription?' · тариф '+m.subscription+' указан пользователем':''}`;
+  }
+  const model=p ? p.label : m.model;
+  const price=p ? `<div class="foot">Regular API Price $${p.input_per_m}/$${p.output_per_m} за 1M in/out</div>` : '';
+  return `<div style="margin:6px 0"><strong>${esc(m.provider==='anthropic'?'Claude':'GPT / Codex')}: ${esc(model)}</strong>`+
+    `<div>${esc(auth)}</div>${price}</div>`;
 }
 async function loadPipelineModels(){
   const box=document.getElementById('pipelineModels');
   try{
     const data=await (await fetch('/api/models')).json();
+    const claude=data.panel.find(m=>m.provider==='anthropic');
+    const gpt=data.panel.find(m=>m.provider==='openai');
+    if(gpt){
+      if(!document.getElementById('gptConnectionSettings').open){
+        document.getElementById('gptAuth').value=gpt.auth;
+        document.getElementById('gptKeyBox').hidden=gpt.auth!=='api';
+      }
+      document.getElementById('gptKeyState').textContent=gpt.has_api_key?'API key сохранён на сервере.':'Сохранённого API key нет.';
+      document.getElementById('removeGptKey').disabled=!gpt.has_api_key;
+    }
+    if(claude){
+      if(!document.getElementById('connectionSettings').open){
+        document.getElementById('claudeAuth').value=claude.auth;
+        document.getElementById('claudeKeyBox').hidden=claude.auth!=='api';
+      }
+      document.getElementById('claudeKeyState').textContent=claude.has_api_key?'API key сохранён на сервере.':'Сохранённого API key нет.';
+      document.getElementById('removeClaudeKey').disabled=!claude.has_api_key;
+    }
     const needed=data.panel.filter(m=>m.enabled && (m.provider==='anthropic'||m.provider==='openai'));
-    box.innerHTML='<strong>Модели pipeline:</strong> '+needed.map(fmtModel).join(' &nbsp;•&nbsp; ')+
-      '<div class="foot">Стоимость ниже — оценка эквивалента стандартного API без cache/tool-токенов; фактически Quorum использует CLI-подписки.</div>';
+    box.innerHTML='<strong>Модели и способ подключения:</strong>'+needed.map(fmtModel).join('')+
+      '<div class="foot">Статус аккаунтов проверяется через CLI раз в минуту. Regular API Price — справочная цена API.</div>';
   }catch(e){ box.textContent='Не удалось загрузить конфигурацию моделей.'; }
+}
+async function changeClaudeConnection(testOnly=false,remove=false){
+  return changeConnection('claude',testOnly,remove);
+}
+async function changeConnection(provider,testOnly=false,remove=false){
+  const cap=provider==='claude'?'Claude':'Gpt';
+  const settings=provider==='claude'?'connectionSettings':'gptConnectionSettings';
+  const status=document.getElementById(provider+'ConnectionStatus');
+  const buttons=['test'+cap+'Connection','save'+cap+'Connection','remove'+cap+'Key'].map(id=>document.getElementById(id));
+  buttons.forEach(b=>b.disabled=true);
+  status.textContent='Проверяю подключение…';
+  try{
+    const response=await fetch('/api/connections/'+provider,{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({auth:remove?'cli':document.getElementById(provider+'Auth').value,
+        api_key:remove?'':document.getElementById(provider+'ApiKey').value,test_only:testOnly,remove_key:remove})});
+    const data=await response.json();
+    if(!response.ok) throw new Error(data.error || 'Не удалось сохранить подключение.');
+    if(!testOnly) document.getElementById(provider+'ApiKey').value='';
+    status.textContent=data.message;
+    if(!testOnly){
+      document.getElementById(settings).open=false;
+      await loadPipelineModels();
+    }
+  }catch(e){ status.textContent=e.message; }
+  finally{ buttons.forEach(b=>b.disabled=false); }
 }
 
 const PIPE_LABEL={draft:'1. Claude — полный анализ',review:'2. GPT/Codex — внутренняя проверка',final:'3. Claude — решение для тебя'};
@@ -1083,6 +1252,19 @@ document.getElementById('ask').addEventListener('click',ask);
 document.getElementById('runPipeline').addEventListener('click',runPipeline);
 document.getElementById('copyGrokPrompt').addEventListener('click',copyGrokPrompt);
 loadPipelineModels();
+setInterval(loadPipelineModels,60000);
+document.getElementById('claudeAuth').addEventListener('change',()=>{
+  document.getElementById('claudeKeyBox').hidden=document.getElementById('claudeAuth').value!=='api';
+});
+document.getElementById('testClaudeConnection').addEventListener('click',()=>changeClaudeConnection(true));
+document.getElementById('saveClaudeConnection').addEventListener('click',()=>changeClaudeConnection());
+document.getElementById('removeClaudeKey').addEventListener('click',()=>changeClaudeConnection(false,true));
+document.getElementById('gptAuth').addEventListener('change',()=>{
+  document.getElementById('gptKeyBox').hidden=document.getElementById('gptAuth').value!=='api';
+});
+document.getElementById('testGptConnection').addEventListener('click',()=>changeConnection('gpt',true));
+document.getElementById('saveGptConnection').addEventListener('click',()=>changeConnection('gpt'));
+document.getElementById('removeGptKey').addEventListener('click',()=>changeConnection('gpt',false,true));
 document.getElementById('addExtra').addEventListener('click',addExtraRow);
 document.getElementById('attachBtn').addEventListener('click',()=>document.getElementById('file').click());
 document.getElementById('file').addEventListener('change',onFiles);

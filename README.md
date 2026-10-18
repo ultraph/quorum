@@ -103,6 +103,22 @@ judge's verdict synthesized on top.
 
 ### Research pipeline
 
+The web UI has separate **Подключение Claude: подписка / API** and
+**Подключение GPT / Codex: подписка / API** sections. They check and switch
+between the provider's CLI subscription login and its API key without changing
+the model. OpenAI API research uses Responses API with live web search.
+Changes apply to the next run and are shared by this single-user installation.
+API keys are stored in `connections.local.json` beside the private config with
+mode 0600; they are never returned to the browser. Key validation checks model
+access without generating text; it does not check credit balance or web-tool
+permissions. API research uses Anthropic's server-side web search and web fetch;
+search calls and source tokens can add charges. Returning to subscription mode
+keeps the saved API key until explicitly deleted.
+
+Claude/Codex account status and plan labels are obtained from their local CLIs,
+cached for one minute, and refreshed by the UI. Labels reflect CLI metadata;
+a plan change may require signing in again before the CLI reports it.
+
 The primary web workflow is a fact-checking pipeline rather than a vote between
 models. Enter the task, use **Copy prompt for Grok**, then paste Grok's
 structured research packet (including source URLs) into quorum. It then runs:

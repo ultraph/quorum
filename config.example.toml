@@ -44,6 +44,7 @@ enabled = true
 # provider = "openai"
 # model = "gpt-6.1-sol"
 # auth = "cli"
+# subscription = "ChatGPT Plus" # optional display label, set by the user
 # cli_bin = "codex"
 # enabled = true
 
