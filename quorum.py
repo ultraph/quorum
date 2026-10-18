@@ -130,6 +130,7 @@ class Config:
 # currently resolving to GPT-5.6 Terra for this account.
 _API_PRICE_ESTIMATES: dict[tuple[str, str], tuple[str, float, float]] = {
     ("anthropic", "claude-opus-5-5"): ("Claude Opus 5.5", 4.00, 20.00),
+    ("anthropic", "claude-haiku-5-5"): ("Claude Haiku 5.5", 0.10, 0.50),
     ("openai", "default"): ("GPT-5.6 Terra (Codex default)", 2.00, 12.00),
     ("openai", "gpt-5.6-terra"): ("GPT-5.6 Terra", 2.00, 12.00),
     ("openai", "gpt-6.1-sol"): ("GPT-6.1 Sol", 2.00, 10.00),
@@ -303,16 +304,52 @@ def _http_json(url: str, payload: dict, headers: dict, timeout: int = 180) -> di
         return json.loads(r.read().decode())
 
 
+# Claude API prices per 1M tokens: (prompt-size tier, input, output, cache read,
+# 5-minute cache write). Haiku 5.5 bills the whole request at the higher tier
+# once its prompt exceeds 100K tokens. Web search is $10 per 1,000; fetch is free.
+_ANTHROPIC_PRICES = {
+    "claude-opus-5-5": [(None, 4.00, 20.00, 0.20, 5.00)],
+    "claude-haiku-5-5": [(100_000, 0.10, 0.50, 0.01, 0.125), (None, 0.50, 2.50, 0.05, 0.625)],
+}
+_WEB_SEARCH_USD = 0.01
+
+
+def _anthropic_request_cost(model: str, u: dict) -> float | None:
+    tiers = _ANTHROPIC_PRICES.get(model)
+    if not tiers:
+        return None
+    read = int(u.get("cache_read_input_tokens") or 0)
+    write = int(u.get("cache_creation_input_tokens") or 0)
+    prompt = int(u.get("input_tokens") or 0) + read + write
+    _, inp, out, cread, cwrite = next(tier for tier in tiers if tier[0] is None or prompt <= tier[0])
+    searches = int((u.get("server_tool_use") or {}).get("web_search_requests") or 0)
+    return (int(u.get("input_tokens") or 0) * inp + int(u.get("output_tokens") or 0) * out
+            + read * cread + write * cwrite) / 1_000_000 + searches * _WEB_SEARCH_USD
+
+
 def _api_anthropic(m: Model, prompt: str, web_tools: bool = False) -> str:
     if not m.api_key:
         raise RuntimeError("no API key (set api_key, e.g. env:ANTHROPIC_API_KEY)")
-    # Opus 5.5 always thinks and thinking shares max_tokens, so keep headroom.
-    # fallbacks="default": a safety-classifier decline is retried server-side
-    # on the model Anthropic recommends for that refusal category.
-    payload = {"model": m.model, "max_tokens": 16000, "fallbacks": "default",
+    haiku = "haiku" in m.model
+    # Current Claude models always think and thinking shares max_tokens, so keep
+    # headroom. Top-level cache_control caches the growing conversation, so a
+    # pause_turn continuation re-reads already fetched pages at cache price.
+    payload = {"model": m.model, "max_tokens": 16000, "cache_control": {"type": "ephemeral"},
                "messages": [{"role": "user", "content": prompt}]}
+    headers = {"x-api-key": m.api_key, "anthropic-version": "2023-06-01",
+               "content-type": "application/json"}
+    if not haiku:
+        # fallbacks="default": a safety-classifier decline is retried server-side
+        # on the model Anthropic recommends; Haiku 5.5 has no such fallback.
+        payload["fallbacks"] = "default"
+        headers["anthropic-beta"] = "server-side-fallback-2026-07-01"
     if web_tools:
+        # Haiku only has the basic web tools (no dynamic filtering). It is the
+        # cheap source reader, so cap how far it wanders.
         payload["tools"] = [
+            {"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
+            {"type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 12},
+        ] if haiku else [
             {"type": "web_search_20260209", "name": "web_search"},
             {"type": "web_fetch_20260209", "name": "web_fetch",
              "citations": {"enabled": True}},
@@ -320,17 +357,18 @@ def _api_anthropic(m: Model, prompt: str, web_tools: bool = False) -> str:
     m.tokens_in = m.tokens_out = 0
     m.tokens_est = False
     m.searches = {}
+    m.cost_usd = 0.0 if m.model in _ANTHROPIC_PRICES else None
     deadline = time.monotonic() + 420
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("Claude API research timed out")
-        out = _http_json(
-            "https://api.anthropic.com/v1/messages", payload,
-            {"x-api-key": m.api_key, "anthropic-version": "2023-06-01",
-             "anthropic-beta": "server-side-fallback-2026-07-01",
-             "content-type": "application/json"}, timeout=remaining)
+        out = _http_json("https://api.anthropic.com/v1/messages", payload, headers,
+                         timeout=remaining)
         u = out.get("usage") or {}
+        m.searches["api_requests"] = m.searches.get("api_requests", 0) + 1
+        if m.cost_usd is not None:
+            m.cost_usd += _anthropic_request_cost(m.model, u)
         m.tokens_in += int(u.get("input_tokens", 0))
         m.tokens_out += int(u.get("output_tokens", 0))
         # fallbacks="default" may hand a refused request to another model.

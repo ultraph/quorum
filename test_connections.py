@@ -119,8 +119,24 @@ class ConnectionTests(unittest.TestCase):
             self.assertEqual(q._api_anthropic(m, "question", True), "answer")
             self.assertEqual([t["name"] for t in http.call_args.args[1]["tools"]], ["web_search", "web_fetch"])
             self.assertEqual((m.tokens_in, m.tokens_out, m.tokens_est), (250, 50, False))
-            self.assertEqual(m.searches, {"web_search_requests": 3, "cache_read_tokens": 40})
+            self.assertEqual(m.searches, {"api_requests": 2, "web_search_requests": 3, "cache_read_tokens": 40})
+            self.assertEqual(http.call_args.args[1]["cache_control"], {"type": "ephemeral"})
+            # Exact bill: tokens + cache reads at $0.20/M + $10 per 1,000 searches.
+            self.assertAlmostEqual(q.estimated_api_cost(m), (250 * 4 + 50 * 20 + 40 * 0.2) / 1_000_000 + 0.03)
             self.assertEqual(m.served_model, "claude-opus-5-5")
+
+    def test_haiku_reader_uses_basic_tools_and_tiered_price(self):
+        m = q.Model("reader", "anthropic", "claude-haiku-5-5", api_key="test-secret")
+        big = {"stop_reason": "end_turn", "content": [{"type": "text", "text": "extracts"}],
+               "usage": {"input_tokens": 120_000, "output_tokens": 1000}}
+        with patch.object(q, "_http_json", return_value=big) as http:
+            self.assertEqual(q._api_anthropic(m, "question", True), "extracts")
+            payload, headers = http.call_args.args[1], http.call_args.args[2]
+        self.assertEqual([t["type"] for t in payload["tools"]], ["web_search_20250305", "web_fetch_20250910"])
+        self.assertNotIn("fallbacks", payload)  # Haiku 5.5 has no server-side fallback
+        self.assertNotIn("anthropic-beta", headers)
+        # Prompt above 100K tokens bills the whole request at the higher tier.
+        self.assertAlmostEqual(q.estimated_api_cost(m), (120_000 * 0.50 + 1000 * 2.50) / 1_000_000)
 
     def test_api_refusal_is_reported(self):
         m = q.Model("claude", "anthropic", "claude-opus-5-5", api_key="test-secret")
@@ -287,6 +303,54 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(restored["status"], "done")
         self.assertIn("перезапуском", restored["events"][-1]["message"])
         self.assertIsNone(webapp._stored_run("../../etc/passwd"))
+
+    def test_api_claude_reads_sources_with_haiku(self):
+        claude = q.Model("claude", "anthropic", "claude-opus-5-5", auth="api", api_key="test-secret")
+        gpt = q.Model("gpt", "openai", "gpt-6.1-sol", auth="cli")
+        calls = []
+
+        def fake_run(m, prompt, web_tools=False):
+            calls.append((m.model, web_tools, prompt))
+            m.answer = "quote: 7659,44" if m.model == "claude-haiku-5-5" else f"{m.model} answer"
+            return m
+
+        class Request:
+            async def json(self):
+                return {"question": "S&P?", "research": "grok packet"}
+
+        async def collect():
+            response = await webapp.api_pipeline(Request())
+            return [json.loads(chunk[6:]) async for chunk in response.body_iterator][1:]
+
+        with patch.object(q, "load_config", return_value=SimpleNamespace(panel=[claude, gpt])), \
+             patch.object(q, "run_model", side_effect=fake_run), \
+             patch.object(webapp, "blockchain_evidence", return_value="none"):
+            events = asyncio.run(collect())
+        self.assertEqual([e["stage"] for e in events if e["type"] == "stage"], ["reader", "draft", "review", "final"])
+        self.assertEqual([(model, web) for model, web, _ in calls],
+                         [("claude-haiku-5-5", True), ("claude-opus-5-5", False),
+                          ("gpt-6.1-sol", True), ("claude-opus-5-5", False)])
+        self.assertIn("quote: 7659,44", calls[1][2])      # Opus works from the extracts
+        self.assertIn("You have no web tools", calls[1][2])
+
+        # A revision reuses the reader's extracts instead of paying for them again.
+        parent_id = runs.recent()[0]["id"]
+
+        class Revise:
+            async def json(self):
+                return {"revision": "короче"}
+
+        async def revise():
+            response = await webapp.api_revise(parent_id, Revise())
+            return [json.loads(chunk[6:]) async for chunk in response.body_iterator][1:]
+
+        calls.clear()
+        with patch.object(q, "load_config", return_value=SimpleNamespace(panel=[claude, gpt])), \
+             patch.object(q, "run_model", side_effect=fake_run), \
+             patch.object(webapp, "blockchain_evidence", return_value="none"):
+            asyncio.run(revise())
+        self.assertNotIn("claude-haiku-5-5", [model for model, _, _ in calls])
+        self.assertIn("quote: 7659,44", calls[0][2])
 
     def test_pipeline_without_grok_key_asks_for_it(self):
         claude = q.Model("claude", "anthropic", "claude-opus-5-5", auth="cli")
