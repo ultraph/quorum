@@ -114,6 +114,7 @@ class Model:
     # Billing details beyond plain in/out tokens: server-side tool calls and
     # cache tokens, so a run can be reconciled against the provider console.
     searches: dict = field(default_factory=dict)
+    served_model: str = ""   # model id the API says actually answered
 
 
 @dataclass
@@ -332,6 +333,8 @@ def _api_anthropic(m: Model, prompt: str, web_tools: bool = False) -> str:
         u = out.get("usage") or {}
         m.tokens_in += int(u.get("input_tokens", 0))
         m.tokens_out += int(u.get("output_tokens", 0))
+        # fallbacks="default" may hand a refused request to another model.
+        m.served_model = out.get("model") or m.served_model
         # Cache tokens and server tool calls are billed separately from
         # input_tokens; every pause_turn continuation is its own request.
         extra = {"cache_read_tokens": u.get("cache_read_input_tokens"),
@@ -386,6 +389,7 @@ def _responses_call(m: Model, url: str, payload: dict, title: str) -> str:
     out = _http_json(url, payload, {"Authorization": f"Bearer {m.api_key}",
                                     "Content-Type": "application/json"}, timeout=420)
     usage = out.get("usage") or {}
+    m.served_model = out.get("model") or ""
     m.tokens_in = int(usage.get("input_tokens", 0))
     m.tokens_out = int(usage.get("output_tokens", 0))
     m.tokens_est = False

@@ -460,11 +460,12 @@ def _stage_event(stage: str, m: q.Model) -> dict:
     # One journal line per stage: results are not stored, so this is the only
     # after-the-fact record of time, spend and search volume.
     cost = q.estimated_api_cost(m)
-    print(f"pipeline stage={stage} model={m.provider}/{m.model} auth={m.auth} "
+    print(f"pipeline stage={stage} model={m.provider}/{m.model} served={m.served_model or '-'} auth={m.auth} "
           f"seconds={m.seconds:.1f} tokens_in={m.tokens_in} tokens_out={m.tokens_out}"
           f"{' (est)' if m.tokens_est else ''} cost_usd={'n/a' if cost is None else f'{cost:.4f}'}"
           f" searches={m.searches or '-'} error={'yes' if m.error else 'no'}", flush=True)
     return {"type": "stage", "stage": stage, "name": m.name, "searches": m.searches,
+            "served_model": m.served_model,
             "provider": m.provider, "model": m.model,
             "answer": m.answer, "error": m.error,
             "seconds": round(m.seconds, 1), "tokens_in": m.tokens_in,
@@ -914,6 +915,12 @@ function fmtTok(o){
   if(!ti && !to) return '';
   return ` · in ${ti.toLocaleString()} · out ${to.toLocaleString()} tokens${o.tokens_est?' (~est)':''}`;
 }
+// APIs may append a date suffix (gpt-…-2026-09-01); only a different model warns.
+function servedNote(o){
+  const s=o.served_model;
+  if(!s || s===o.model || s.startsWith(o.model+'-')) return s ? ' ✓' : '';
+  return ` <span style="color:var(--err)">⚠ ответила ${esc(s)}</span>`;
+}
 function fmtSearches(s){
   if(!s) return '';
   const parts=[['web_search_calls','веб-поисков'],['web_search_requests','веб-поисков'],['web_fetch_requests','открытых страниц'],
@@ -1119,7 +1126,7 @@ async function followRun(resp){
           if(!cards[o.stage]){ cards[o.stage]=d; out.appendChild(d); }
           const cost=fmtCost(o.cost_usd);
           const meta=o.reused_from ? `${esc(o.provider)}/${esc(o.model)} · взято из прогона от ${esc(o.reused_from)}, повторно не оплачивалось`
-            : `${esc(o.provider)}/${esc(o.model)} · ${o.seconds}s${fmtTok(o)}${cost?' · '+cost:''}${fmtSearches(o.searches)}`;
+            : `${esc(o.provider)}/${esc(o.model)}${servedNote(o)} · ${o.seconds}s${fmtTok(o)}${cost?' · '+cost:''}${fmtSearches(o.searches)}`;
           const title=`${esc(PIPE_LABEL[o.stage]||o.stage)} <span class="meta">${meta}</span>`;
           const body=o.error ? `<pre class="err">ERROR: ${esc(o.error)}</pre>` : `<div class="md">${mdToHtml(o.answer)}</div>`;
           if(!o.error && o.stage!=='final'){

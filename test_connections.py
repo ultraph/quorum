@@ -111,7 +111,7 @@ class ConnectionTests(unittest.TestCase):
         responses = [
             {"stop_reason": "pause_turn", "content": [{"type": "text", "text": "working"}],
              "usage": {"input_tokens": 100, "output_tokens": 20}},
-            {"stop_reason": "end_turn", "content": [{"type": "text", "text": "answer"}],
+            {"stop_reason": "end_turn", "model": "claude-opus-5-5", "content": [{"type": "text", "text": "answer"}],
              "usage": {"input_tokens": 150, "output_tokens": 30, "cache_read_input_tokens": 40,
                        "server_tool_use": {"web_search_requests": 3}}},
         ]
@@ -120,6 +120,7 @@ class ConnectionTests(unittest.TestCase):
             self.assertEqual([t["name"] for t in http.call_args.args[1]["tools"]], ["web_search", "web_fetch"])
             self.assertEqual((m.tokens_in, m.tokens_out, m.tokens_est), (250, 50, False))
             self.assertEqual(m.searches, {"web_search_requests": 3, "cache_read_tokens": 40})
+            self.assertEqual(m.served_model, "claude-opus-5-5")
 
     def test_api_refusal_is_reported(self):
         m = q.Model("claude", "anthropic", "claude-opus-5-5", api_key="test-secret")
