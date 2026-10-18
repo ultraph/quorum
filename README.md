@@ -119,11 +119,13 @@ Claude/Codex account status and plan labels are obtained from their local CLIs,
 cached for one minute, and refreshed by the UI. Labels reflect CLI metadata;
 a plan change may require signing in again before the CLI reports it.
 
-The primary web workflow is a fact-checking pipeline rather than a vote between
-models. Enter the task, use **Copy prompt for Grok**, then paste Grok's
-structured research packet (including source URLs) into quorum. It then runs:
+The primary web workflow (v3) is a fact-checking pipeline rather than a vote
+between models. Enter the task and run it:
 
-1. **Grok** supplies a manually pasted research packet and source links;
+1. **Grok** researches the web and X through the xAI Responses API
+   (`web_search` + `x_search`) and returns a structured packet with source
+   URLs. A manual mode remains: use **Copy prompt for Grok**, run it in any
+   Grok chat, and paste the answer;
 2. **Claude** opens and checks the supplied sources, then writes a complete
    internal analysis with calculations and assumptions;
 3. **GPT/Codex** independently checks substantive claims, arithmetic, and
@@ -135,7 +137,10 @@ default. The final stage leads with the recommendation, decision-relevant
 numbers, uncertainties, and the next action; it expands into a long technical
 report only when the user explicitly asks for one.
 
-The manual Grok paste is deliberate: it works without an xAI API key. Claude's
+Grok is API-only (a SuperGrok subscription does not include API credits); its
+key is set from the web UI, like the Claude/GPT keys, and checked through
+`GET /v1/models/{id}`. Claude and GPT each switch independently between a
+subscription CLI login and an API key. Claude's
 web access is enabled only for this pipeline; it uses Claude Code's `WebFetch`
 and `WebSearch` tools. You can add revision notes and run the pipeline again.
 When Grok supplies complete EVM addresses, Quorum also queries the configured

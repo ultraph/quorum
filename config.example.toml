@@ -38,6 +38,18 @@ auth = "api"
 api_key = "env:OPENAI_API_KEY"
 enabled = true
 
+# ---- xAI (Grok) -------------------------------------------------------------
+# Research stage of the web pipeline: Grok searches the web and X through the
+# xAI Responses API. API-only (a SuperGrok subscription does not include API
+# credits). Can also be switched to "manual" paste mode from the web UI.
+[[panel]]
+name = "grok"
+provider = "xai"
+model = "grok-4.7"
+auth = "api"
+api_key = "env:XAI_API_KEY"
+enabled = true
+
 # CLI mode for GPT uses the Codex CLI (`codex exec`):
 # [[panel]]
 # name = "gpt"

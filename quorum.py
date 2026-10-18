@@ -96,7 +96,7 @@ def render_md(text: str) -> str:
 @dataclass
 class Model:
     name: str                # short label shown to the user
-    provider: str            # anthropic | openai | gemini | deepseek
+    provider: str            # anthropic | openai | xai | gemini | deepseek
     model: str               # provider model id
     auth: str = "api"        # api | cli
     api_key: str = ""        # resolved key (api mode)
@@ -128,6 +128,7 @@ _API_PRICE_ESTIMATES: dict[tuple[str, str], tuple[str, float, float]] = {
     ("openai", "default"): ("GPT-5.6 Terra (Codex default)", 2.00, 12.00),
     ("openai", "gpt-5.6-terra"): ("GPT-5.6 Terra", 2.00, 12.00),
     ("openai", "gpt-6.1-sol"): ("GPT-6.1 Sol", 2.00, 10.00),
+    ("xai", "grok-4.7"): ("Grok 4.7", 2.00, 6.00),
 }
 
 
@@ -270,7 +271,7 @@ def load_config() -> Config:
     overrides = connections.read(CONFIG_PATH)
     for m in panel:
         override = overrides.get(m.provider, {})
-        if m.provider in ("anthropic", "openai"):
+        if m.provider in ("anthropic", "openai", "xai"):
             m.auth = override.get("auth", m.auth)
             m.api_key = override.get("api_key", m.api_key)
     jt = raw.get("judge", {})
@@ -344,20 +345,33 @@ def _api_openai_responses(m: Model, prompt: str, web_tools: bool = False) -> str
                "reasoning": {"effort": "medium"}}
     if web_tools:
         payload["tools"] = [{"type": "web_search"}]
-    out = _http_json("https://api.openai.com/v1/responses", payload,
-                     {"Authorization": f"Bearer {m.api_key}",
-                      "Content-Type": "application/json"}, timeout=420)
+    return _responses_call(m, "https://api.openai.com/v1/responses", payload, "OpenAI")
+
+
+def _api_xai_responses(m: Model, prompt: str, web_tools: bool = False) -> str:
+    """Grok through xAI's Responses API; x_search is what makes Grok the X researcher."""
+    if not m.api_key:
+        raise RuntimeError("no xAI API key")
+    payload = {"model": m.model, "input": prompt, "store": False}
+    if web_tools:
+        payload["tools"] = [{"type": "web_search"}, {"type": "x_search"}]
+    return _responses_call(m, "https://api.x.ai/v1/responses", payload, "xAI")
+
+
+def _responses_call(m: Model, url: str, payload: dict, title: str) -> str:
+    out = _http_json(url, payload, {"Authorization": f"Bearer {m.api_key}",
+                                    "Content-Type": "application/json"}, timeout=420)
     usage = out.get("usage") or {}
     m.tokens_in = int(usage.get("input_tokens", 0))
     m.tokens_out = int(usage.get("output_tokens", 0))
     m.tokens_est = False
     if out.get("status") != "completed":
-        raise RuntimeError("OpenAI API response did not complete")
+        raise RuntimeError(f"{title} API response did not complete")
     answer = "\n".join(block.get("text", "")
                        for item in out.get("output", []) if item.get("type") == "message"
                        for block in item.get("content", []) if block.get("type") == "output_text").strip()
     if not answer:
-        raise RuntimeError("OpenAI API returned no text")
+        raise RuntimeError(f"{title} API returned no text")
     return answer
 
 
@@ -474,6 +488,8 @@ def call_model(m: Model, prompt: str, web_tools: bool = False) -> str:
         return _api_anthropic(m, prompt, web_tools)
     if m.provider == "openai":
         return _api_openai_responses(m, prompt, web_tools)
+    if m.provider == "xai":
+        return _api_xai_responses(m, prompt, web_tools)
     if m.provider == "deepseek":
         return _api_openai_compatible(m, prompt, "https://api.deepseek.com")
     if m.provider == "gemini":
@@ -630,6 +646,8 @@ PROVIDERS_META = {
                   "default_model": "gpt-5.5", "default_name": "gpt"},
     "gemini":    {"label": "Google (Gemini)", "cli": None,
                   "default_model": "gemini-2.5-flash", "default_name": "gemini"},
+    "xai":       {"label": "xAI (Grok)", "cli": None,
+                  "default_model": "grok-4.7", "default_name": "grok"},
     "deepseek":  {"label": "DeepSeek", "cli": None,
                   "default_model": "deepseek-v4-pro", "default_name": "deepseek"},
 }

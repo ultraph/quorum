@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -139,7 +140,9 @@ def api_models() -> JSONResponse:
     cfg = q.load_config()
     def item(m: q.Model) -> dict:
         return {"name": m.name, "provider": m.provider, "model": m.model,
-                "auth": m.auth, "enabled": m.enabled,
+                "auth": m.auth,
+                # Grok joins the ad-hoc panel only when it is callable via API.
+                "enabled": m.enabled and (m.provider != "xai" or (m.auth == "api" and bool(m.api_key))),
                 "subscription": m.subscription,
                 "has_api_key": bool(m.api_key),
                 "account": account_status(m.provider, q._find_bin(
@@ -163,17 +166,31 @@ async def gpt_connection(req: Request) -> JSONResponse:
     return await update_connection(req, "openai")
 
 
+@app.post("/api/connections/grok")
+async def grok_connection(req: Request) -> JSONResponse:
+    return await update_connection(req, "xai")
+
+
+# provider → (title, CLI binary or None, key-check URL prefix)
+_CONNECTIONS = {
+    "anthropic": ("Anthropic", "claude", "https://api.anthropic.com/v1/models/"),
+    "openai": ("OpenAI", "codex", "https://api.openai.com/v1/models/"),
+    "xai": ("xAI", None, "https://api.x.ai/v1/models/"),
+}
+
+
 async def update_connection(req: Request, provider: str) -> JSONResponse:
-    title = "Anthropic" if provider == "anthropic" else "OpenAI"
-    binary = "claude" if provider == "anthropic" else "codex"
+    title, binary, models_url = _CONNECTIONS[provider]
+    # Grok has no CLI login: its alternative to the API is the manual paste.
+    alternative = "cli" if binary else "manual"
     # JSON-only, same-origin writes. Never echo keys or upstream error bodies.
     origin = req.headers.get("origin")
     if (origin and urllib.parse.urlsplit(origin).netloc != req.headers.get("host")) or not req.headers.get("content-type", "").startswith("application/json"):
         return JSONResponse({"error": "Запрос должен исходить из интерфейса Quorum."}, status_code=403)
     body = await req.json()
     auth = body.get("auth")
-    if auth not in ("cli", "api"):
-        return JSONResponse({"error": "Выберите подписку или API."}, status_code=400)
+    if auth not in (alternative, "api"):
+        return JSONResponse({"error": "Выберите способ подключения."}, status_code=400)
     cfg = q.load_config()
     model = next((m for m in cfg.panel if m.provider == provider), None)
     if not model:
@@ -183,17 +200,16 @@ async def update_connection(req: Request, provider: str) -> JSONResponse:
         return JSONResponse({"error": "Некорректный ключ."}, status_code=400)
     key = raw_key.strip() or model.api_key
     remove = body.get("remove_key") is True
-    if remove and auth != "cli":
-        return JSONResponse({"error": "Перед удалением ключа выберите подписку."}, status_code=400)
+    if remove and auth != alternative:
+        return JSONResponse({"error": "Перед удалением ключа выберите другой способ подключения."}, status_code=400)
     if auth == "api":
         if not key or any(c.isspace() for c in key):
             return JSONResponse({"error": f"Введите {title} API key."}, status_code=400)
         if provider == "openai" and model.model == "default":
             return JSONResponse({"error": "Для OpenAI API нужен явный ID модели вместо default."}, status_code=400)
         def verify():
-            base = "https://api.anthropic.com/v1/models/" if provider == "anthropic" else "https://api.openai.com/v1/models/"
             headers = {"x-api-key": key, "anthropic-version": "2023-06-01"} if provider == "anthropic" else {"Authorization": f"Bearer {key}"}
-            request = urllib.request.Request(base + urllib.parse.quote(model.model, safe=""), headers=headers)
+            request = urllib.request.Request(models_url + urllib.parse.quote(model.model, safe=""), headers=headers)
             with urllib.request.urlopen(request, timeout=15) as response:
                 json.load(response)
         try:
@@ -202,12 +218,13 @@ async def update_connection(req: Request, provider: str) -> JSONResponse:
             return JSONResponse({"error": f"{title} API: HTTP {exc.code}. Проверьте ключ и доступ к модели."}, status_code=400)
         except (OSError, ValueError):
             return JSONResponse({"error": f"Не удалось связаться с {title} API."}, status_code=502)
-    else:
+    elif binary:
         status = await asyncio.to_thread(account_status, provider, q._find_bin(binary, model.cli_bin))
         if status.get("status") != "signed_in" or status.get("mode") != "subscription":
             return JSONResponse({"error": f"В {binary} нет подтверждённого входа через подписку. Выполните вход на сервере."}, status_code=400)
     if body.get("test_only") is True:
-        return JSONResponse({"message": "Ключ и доступ к модели проверены. Запуск модели и баланс кредитов не проверялись." if auth == "api" else "Вход через подписку подтверждён."})
+        return JSONResponse({"message": "Ключ и доступ к модели проверены. Запуск модели и баланс кредитов не проверялись." if auth == "api"
+                             else "Вход через подписку подтверждён." if binary else "Ручной режим: ответ Grok вставляется в поле 2."})
     await asyncio.to_thread(connections.save_claude, q.CONFIG_PATH, auth,
                             key if auth == "api" else None, remove, provider)
     return JSONResponse({"message": "Подключение сохранено. Применится к следующему запуску."})
@@ -313,7 +330,7 @@ process narration or X-post discussion.
 === USER REQUEST ===
 {question}
 
-=== MANUALLY PASTED GROK RESEARCH ===
+=== GROK RESEARCH (web + X) ===
 {research}
 
 === INDEPENDENT BLOCKSCOUT EVIDENCE ===
@@ -426,31 +443,134 @@ provide more detail: the full analysis is already available in the UI.
 """
 
 
+GROK_RESEARCH = """\
+Сегодня {today}. Исследуй запрос пользователя:
+
+=== ЗАПРОС И КОНТЕКСТ ПОЛЬЗОВАТЕЛЯ ===
+{question}
+=== КОНЕЦ КОНТЕКСТА ===
+
+Ты — исследовательский этап в цепочке Grok → Claude → Codex → Claude.
+Собери компактный, проверяемый пакет исходных данных для следующих моделей.
+Не пиши финальную статью, не принимай окончательное решение за пользователя
+и не подменяй неизвестные данные догадками.
+
+Правила:
+1. Данные, явно данные пользователем, считай входными. Не пытайся опровергать
+   их без причины и не придумывай отсутствующую детализацию. Отмечай, когда
+   расчёт опирается на такие данные.
+2. Для внешних фактов предпочитай первоисточники: официальную документацию,
+   API-документацию, реестры, отчёты компаний, государственные данные и
+   оригинальные исследования. Не используй поисковый сниппет как доказательство.
+3. Каждый существенный внешний факт сопровождай прямым URL рядом с ним. Если
+   источник вторичный, старый, недоступный или противоречивый — отметь это.
+   Не выдумывай URL, цитаты, даты, числа или доступ к источнику.
+4. Не делай длинных расчётов и не выноси окончательный вердикт. Разрешены
+   только простые прозрачные производные величины из входных данных с формулой
+   и пометкой «расчёт из входных данных».
+5. X/Twitter используй только если запрос прямо связан со свежими постами,
+   реакциями, заявлениями в X или новостным сигналом. Тогда укажи автора,
+   дату, URL и пометку «сигнал; требует независимого подтверждения». Не трать
+   время на точные timestamp/ID постов, если это не цель запроса.
+6. Блокчейн-проверку используй только для крипто/on-chain тем. Для каждого
+   токена, контракта, кошелька, пула или транзакции укажи сеть, назначение и
+   полный идентификатор. EVM-адрес пиши как 0x + 40 hex-символов, без
+   сокращений. Если полного адреса нет — скажи это, не угадывай.
+7. Не добавляй разделы про X, блокчейн, цены API, бенчмарки, право, медицину
+   или другие специализированные области, если они не относятся к запросу.
+
+Формат ответа:
+
+## Краткая карта исследования
+3–7 тезисов: что известно и что наиболее важно проверить дальше.
+
+## Проверенные факты
+Для каждого существенного факта:
+- утверждение;
+- источник и тип источника;
+- прямая ссылка;
+- уверенность: высокая / средняя / низкая.
+
+## Входные данные пользователя и простые расчёты
+Только если пользователь дал цифры или факты, на которых строится задача.
+Отделяй их от внешне проверенных фактов.
+
+## Неизвестные и риски
+Только пункты, способные изменить итоговое решение или вывод.
+
+## Свежие сигналы из X
+Выводи только если X релевантен запросу; иначе не выводи этот раздел.
+
+## On-chain данные
+Выводи только если тема крипто/on-chain; иначе не выводи этот раздел.
+
+## Источники
+Нумерованный список URL, которые ты реально использовал.
+"""
+
+
+def grok_research_prompt(question: str) -> str:
+    return GROK_RESEARCH.format(today=time.strftime("%d.%m.%Y"),
+                                question=question or "[вставь тему или вопрос]")
+
+
+@app.post("/api/grok_prompt")
+async def api_grok_prompt(req: Request) -> JSONResponse:
+    body = await req.json()
+    return JSONResponse({"prompt": grok_research_prompt((body.get("question") or "").strip())})
+
+
+def _stage_event(stage: str, m: q.Model) -> dict:
+    return {"type": "stage", "stage": stage, "name": m.name,
+            "provider": m.provider, "model": m.model,
+            "answer": m.answer, "error": m.error,
+            "seconds": round(m.seconds, 1), "tokens_in": m.tokens_in,
+            "tokens_out": m.tokens_out, "tokens_est": m.tokens_est,
+            "cost_usd": q.estimated_api_cost(m)}
+
+
 @app.post("/api/pipeline")
 async def api_pipeline(req: Request) -> StreamingResponse:
-    """Manual-Grok research → Claude draft → GPT review → Claude final."""
+    """Grok research (xAI API or manual paste) → Claude draft → GPT review → Claude final."""
     body = await req.json()
     question = (body.get("question") or "").strip()
     research = (body.get("research") or "").strip()
     revision = (body.get("revision") or "").strip() or "(none)"
 
     async def gen():
+        nonlocal research
         if not question:
             yield _sse({"type": "error", "message": "Enter the request."})
-            return
-        if not research:
-            yield _sse({"type": "error", "message": "Paste Grok research and its source links first."})
             return
 
         cfg = q.load_config()
         claude = next((m for m in cfg.panel if m.enabled and m.provider == "anthropic"), None)
         gpt = next((m for m in cfg.panel if m.enabled and m.provider == "openai"), None)
+        grok = next((m for m in cfg.panel if m.enabled and m.provider == "xai"), None)
         if claude is None or gpt is None:
             missing = "Claude" if claude is None else "GPT/Codex"
             yield _sse({"type": "error", "message": f"{missing} is not enabled in the Quorum config."})
             return
 
         loop = asyncio.get_running_loop()
+        stages = []
+
+        # Pasted research always wins; otherwise Grok researches via the xAI API.
+        if not research:
+            if grok is None or grok.auth != "api" or not grok.api_key:
+                yield _sse({"type": "error", "message":
+                            "Grok API не подключён: добавь xAI API key в «Подключение Grok» или вставь исследование вручную в поле 2."})
+                return
+            yield _sse({"type": "stage_start", "stage": "research", "name": grok.name,
+                        "provider": grok.provider, "model": grok.model})
+            research_result = await loop.run_in_executor(
+                None, q.run_model, grok, grok_research_prompt(question), True)
+            stages.append(research_result)
+            yield _sse(_stage_event("research", research_result))
+            if research_result.error:
+                yield _sse({"type": "done", "ok": False})
+                return
+            research = research_result.answer
 
         yield _sse({"type": "info", "message": "Проверяю полные EVM-адреса через Blockscout…"})
         chain_evidence = await loop.run_in_executor(
@@ -461,12 +581,8 @@ async def api_pipeline(req: Request) -> StreamingResponse:
         yield _sse({"type": "stage_start", "stage": "draft", "name": claude.name,
                     "provider": claude.provider, "model": claude.model})
         draft_result = await loop.run_in_executor(None, q.run_model, claude, prompt, True)
-        yield _sse({"type": "stage", "stage": "draft", "name": draft_result.name,
-                    "provider": draft_result.provider, "model": draft_result.model,
-                    "answer": draft_result.answer, "error": draft_result.error,
-                    "seconds": round(draft_result.seconds, 1), "tokens_in": draft_result.tokens_in,
-                    "tokens_out": draft_result.tokens_out, "tokens_est": draft_result.tokens_est,
-                    "cost_usd": q.estimated_api_cost(draft_result)})
+        stages.append(draft_result)
+        yield _sse(_stage_event("draft", draft_result))
         if draft_result.error:
             yield _sse({"type": "done", "ok": False})
             return
@@ -476,12 +592,8 @@ async def api_pipeline(req: Request) -> StreamingResponse:
         yield _sse({"type": "stage_start", "stage": "review", "name": gpt.name,
                     "provider": gpt.provider, "model": gpt.model})
         review_result = await loop.run_in_executor(None, q.run_model, gpt, prompt, True)
-        yield _sse({"type": "stage", "stage": "review", "name": review_result.name,
-                    "provider": review_result.provider, "model": review_result.model,
-                    "answer": review_result.answer, "error": review_result.error,
-                    "seconds": round(review_result.seconds, 1), "tokens_in": review_result.tokens_in,
-                    "tokens_out": review_result.tokens_out, "tokens_est": review_result.tokens_est,
-                    "cost_usd": q.estimated_api_cost(review_result)})
+        stages.append(review_result)
+        yield _sse(_stage_event("review", review_result))
         if review_result.error:
             yield _sse({"type": "done", "ok": False})
             return
@@ -492,16 +604,12 @@ async def api_pipeline(req: Request) -> StreamingResponse:
         yield _sse({"type": "stage_start", "stage": "final", "name": claude.name,
                     "provider": claude.provider, "model": claude.model})
         final_result = await loop.run_in_executor(None, q.run_model, replace(claude), prompt, True)
-        yield _sse({"type": "stage", "stage": "final", "name": final_result.name,
-                    "provider": final_result.provider, "model": final_result.model,
-                    "answer": final_result.answer, "error": final_result.error,
-                    "seconds": round(final_result.seconds, 1), "tokens_in": final_result.tokens_in,
-                    "tokens_out": final_result.tokens_out, "tokens_est": final_result.tokens_est,
-                    "cost_usd": q.estimated_api_cost(final_result)})
-        costs = [q.estimated_api_cost(m) for m in (draft_result, review_result, final_result)]
+        stages.append(final_result)
+        yield _sse(_stage_event("final", final_result))
+        costs = [q.estimated_api_cost(m) for m in stages]
         yield _sse({"type": "done", "ok": not bool(final_result.error),
                     "total_cost_usd": sum(c for c in costs if c is not None),
-                    "cost_est": any(m.tokens_est for m in (draft_result, review_result, final_result))})
+                    "cost_est": any(m.tokens_est for m in stages)})
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -706,8 +814,31 @@ INDEX_HTML = r"""<!doctype html>
   <div id="out"></div>
   <div class="card">
     <h2 style="margin:0 0 5px;font-size:18px">Research pipeline</h2>
-    <div class="foot" style="margin:0 0 16px">Временно: найди свежие данные в Grok вручную и вставь сюда ответ вместе со ссылками. Quorum не использует Grok API.</div>
+    <div class="foot" style="margin:0 0 16px">Grok сам ищет свежие данные в вебе и X через xAI API, затем Claude и GPT проверяют и решают. Ручная вставка ответа Grok осталась как запасной режим.</div>
     <div id="pipelineModels" class="pipeline-models">Загружаю выбранные модели…</div>
+    <details class="pipeline-models" id="grokConnectionSettings">
+      <summary style="cursor:pointer">Подключение Grok: API / вручную</summary>
+      <div style="margin-top:12px">
+        <label for="grokAuth">Способ подключения</label>
+        <select id="grokAuth">
+          <option value="api">xAI API · Grok ищет сам (веб + X)</option>
+          <option value="manual">Вручную · вставить ответ Grok в поле 2</option>
+        </select>
+        <div id="grokKeyBox" style="margin-top:10px" hidden>
+          <label for="grokApiKey">xAI API key</label>
+          <input id="grokApiKey" type="password" autocomplete="new-password" placeholder="Введите ключ; оставьте пустым, чтобы использовать сохранённый" style="width:100%">
+          <div class="foot" id="grokKeyState"></div>
+          <div class="foot">Ключ создаётся в console.x.ai. API оплачивается отдельно от подписки SuperGrok: токены плюс поиск ($5 за 1 000 веб-поисков, $5 за 1 000 найденных постов X).</div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button type="button" id="testGrokConnection" class="ghost">Проверить подключение</button>
+          <button type="button" id="saveGrokConnection">Сохранить</button>
+          <button type="button" id="removeGrokKey" class="ghost">Удалить сохранённый API key</button>
+        </div>
+        <div class="foot" id="grokConnectionStatus" role="status"></div>
+        <div class="foot">Модель сохраняется. Изменение действует со следующего запуска и общее для этой установки Quorum.</div>
+      </div>
+    </details>
     <details class="pipeline-models" id="connectionSettings">
       <summary style="cursor:pointer">Подключение Claude: подписка / API</summary>
       <div style="margin-top:12px">
@@ -756,14 +887,17 @@ INDEX_HTML = r"""<!doctype html>
     </details>
     <label>1. Что нужно подготовить?</label>
     <textarea id="pipeQ" placeholder="Например: подготовь проверенный разбор новости…"></textarea>
+    <div id="grokApiNote" class="foot" style="margin-top:14px">2. Исследование: Grok выполнит его сам через xAI API.</div>
+    <div id="grokManualBox" hidden>
     <label style="margin-top:14px">2. Исследование из Grok <span style="font-weight:400">— вставь текст, посты и URL источников</span></label>
     <div class="foot" style="margin:-2px 0 8px">Сначала скопируй готовый запрос в Grok; его ответ уже будет пригоден для вставки сюда.</div>
     <button type="button" id="copyGrokPrompt" class="ghost">📋 Copy prompt for Grok</button>
     <textarea id="grokNotes" style="min-height:180px" placeholder="Вставь сюда результат поиска Grok. Сохраняй ссылки, даты и цитаты — они пойдут автору и фактчекеру."></textarea>
+    </div>
     <label style="margin-top:14px">3. Что исправить в следующей версии? <span style="font-weight:400">— необязательно</span></label>
     <textarea id="revisionNotes" style="min-height:70px" placeholder="Например: сократи до 500 слов, проверь цифру из второго источника, добавь контекст…"></textarea>
     <div class="row" style="margin-top:14px">
-      <span class="foot">Claude проверяет источники → GPT/Codex делает ревью → Claude готовит финал</span>
+      <span class="foot">Grok ищет → Claude проверяет источники → GPT/Codex делает ревью → Claude готовит финал</span>
       <div style="margin-left:auto"><button id="runPipeline">Run pipeline</button></div>
     </div>
     <div class="foot" id="pipelineStatus"></div>
@@ -866,6 +1000,11 @@ function fmtCost(v){
 }
 function fmtModel(m){
   const p=m.pricing;
+  if(m.provider==='xai'){
+    const how=m.auth==='api' ? (m.has_api_key?'Через xAI API · оплата по токенам и поиску':'xAI API · ключ не задан') : 'Вручную · ответ Grok вставляется в поле 2';
+    const gprice=p && m.auth==='api' ? `<div class="foot">Regular API Price $${p.input_per_m}/$${p.output_per_m} за 1M in/out</div>` : '';
+    return `<div style="margin:6px 0"><strong>Grok: ${esc(p?p.label:m.model)}</strong><div>${esc(how)}</div>${gprice}</div>`;
+  }
   const a=m.account || {}, service=m.provider==='anthropic' ? 'Claude' : 'ChatGPT';
   const cli=m.provider==='anthropic' ? 'Claude Code CLI' : 'Codex CLI';
   let auth='Через API · оплата по токенам';
@@ -881,12 +1020,28 @@ function fmtModel(m){
   return `<div style="margin:6px 0"><strong>${esc(m.provider==='anthropic'?'Claude':'GPT / Codex')}: ${esc(model)}</strong>`+
     `<div>${esc(auth)}</div>${price}</div>`;
 }
+let GROK_MODE='manual';
+function applyGrokMode(){
+  document.getElementById('grokManualBox').hidden=GROK_MODE==='api';
+  document.getElementById('grokApiNote').hidden=GROK_MODE!=='api';
+}
 async function loadPipelineModels(){
   const box=document.getElementById('pipelineModels');
   try{
     const data=await (await fetch('/api/models')).json();
     const claude=data.panel.find(m=>m.provider==='anthropic');
     const gpt=data.panel.find(m=>m.provider==='openai');
+    const grok=data.panel.find(m=>m.provider==='xai');
+    GROK_MODE=grok ? grok.auth : 'manual';
+    if(grok){
+      if(!document.getElementById('grokConnectionSettings').open){
+        document.getElementById('grokAuth').value=grok.auth;
+        document.getElementById('grokKeyBox').hidden=grok.auth!=='api';
+      }
+      document.getElementById('grokKeyState').textContent=grok.has_api_key?'API key сохранён на сервере.':'Сохранённого API key нет.';
+      document.getElementById('removeGrokKey').disabled=!grok.has_api_key;
+    }
+    applyGrokMode();
     if(gpt){
       if(!document.getElementById('gptConnectionSettings').open){
         document.getElementById('gptAuth').value=gpt.auth;
@@ -903,7 +1058,7 @@ async function loadPipelineModels(){
       document.getElementById('claudeKeyState').textContent=claude.has_api_key?'API key сохранён на сервере.':'Сохранённого API key нет.';
       document.getElementById('removeClaudeKey').disabled=!claude.has_api_key;
     }
-    const needed=data.panel.filter(m=>m.enabled && (m.provider==='anthropic'||m.provider==='openai'));
+    const needed=data.panel.filter(m=>(m.enabled || m.provider==='xai') && ['xai','anthropic','openai'].includes(m.provider));
     box.innerHTML='<strong>Модели и способ подключения:</strong>'+needed.map(fmtModel).join('')+
       '<div class="foot">Статус аккаунтов проверяется через CLI раз в минуту. Regular API Price — справочная цена API.</div>';
   }catch(e){ box.textContent='Не удалось загрузить конфигурацию моделей.'; }
@@ -912,15 +1067,15 @@ async function changeClaudeConnection(testOnly=false,remove=false){
   return changeConnection('claude',testOnly,remove);
 }
 async function changeConnection(provider,testOnly=false,remove=false){
-  const cap=provider==='claude'?'Claude':'Gpt';
-  const settings=provider==='claude'?'connectionSettings':'gptConnectionSettings';
+  const cap=provider.charAt(0).toUpperCase()+provider.slice(1);
+  const settings=provider==='claude'?'connectionSettings':provider+'ConnectionSettings';
   const status=document.getElementById(provider+'ConnectionStatus');
   const buttons=['test'+cap+'Connection','save'+cap+'Connection','remove'+cap+'Key'].map(id=>document.getElementById(id));
   buttons.forEach(b=>b.disabled=true);
   status.textContent='Проверяю подключение…';
   try{
     const response=await fetch('/api/connections/'+provider,{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({auth:remove?'cli':document.getElementById(provider+'Auth').value,
+      body:JSON.stringify({auth:remove?(provider==='grok'?'manual':'cli'):document.getElementById(provider+'Auth').value,
         api_key:remove?'':document.getElementById(provider+'ApiKey').value,test_only:testOnly,remove_key:remove})});
     const data=await response.json();
     if(!response.ok) throw new Error(data.error || 'Не удалось сохранить подключение.');
@@ -934,74 +1089,12 @@ async function changeConnection(provider,testOnly=false,remove=false){
   finally{ buttons.forEach(b=>b.disabled=false); }
 }
 
-const PIPE_LABEL={draft:'1. Claude — полный анализ',review:'2. GPT/Codex — внутренняя проверка',final:'3. Claude — решение для тебя'};
-function grokResearchPrompt(){
-  const task=document.getElementById('pipeQ').value.trim() || '[вставь тему или вопрос]';
-  return `Исследуй запрос пользователя:
-
-=== ЗАПРОС И КОНТЕКСТ ПОЛЬЗОВАТЕЛЯ ===
-${task}
-=== КОНЕЦ КОНТЕКСТА ===
-
-Ты — исследовательский этап в цепочке Grok → Claude → Codex → Claude.
-Собери компактный, проверяемый пакет исходных данных для следующих моделей.
-Не пиши финальную статью, не принимай окончательное решение за пользователя
-и не подменяй неизвестные данные догадками.
-
-Правила:
-1. Данные, явно данные пользователем, считай входными. Не пытайся опровергать
-   их без причины и не придумывай отсутствующую детализацию. Отмечай, когда
-   расчёт опирается на такие данные.
-2. Для внешних фактов предпочитай первоисточники: официальную документацию,
-   API-документацию, реестры, отчёты компаний, государственные данные и
-   оригинальные исследования. Не используй поисковый сниппет как доказательство.
-3. Каждый существенный внешний факт сопровождай прямым URL рядом с ним. Если
-   источник вторичный, старый, недоступный или противоречивый — отметь это.
-   Не выдумывай URL, цитаты, даты, числа или доступ к источнику.
-4. Не делай длинных расчётов и не выноси окончательный вердикт. Разрешены
-   только простые прозрачные производные величины из входных данных с формулой
-   и пометкой «расчёт из входных данных».
-5. X/Twitter используй только если запрос прямо связан со свежими постами,
-   реакциями, заявлениями в X или новостным сигналом. Тогда укажи автора,
-   дату, URL и пометку «сигнал; требует независимого подтверждения». Не трать
-   время на точные timestamp/ID постов, если это не цель запроса.
-6. Блокчейн-проверку используй только для крипто/on-chain тем. Для каждого
-   токена, контракта, кошелька, пула или транзакции укажи сеть, назначение и
-   полный идентификатор. EVM-адрес пиши как 0x + 40 hex-символов, без
-   сокращений. Если полного адреса нет — скажи это, не угадывай.
-7. Не добавляй разделы про X, блокчейн, цены API, бенчмарки, право, медицину
-   или другие специализированные области, если они не относятся к запросу.
-
-Формат ответа:
-
-## Краткая карта исследования
-3–7 тезисов: что известно и что наиболее важно проверить дальше.
-
-## Проверенные факты
-Для каждого существенного факта:
-- утверждение;
-- источник и тип источника;
-- прямая ссылка;
-- уверенность: высокая / средняя / низкая.
-
-## Входные данные пользователя и простые расчёты
-Только если пользователь дал цифры или факты, на которых строится задача.
-Отделяй их от внешне проверенных фактов.
-
-## Неизвестные и риски
-Только пункты, способные изменить итоговое решение или вывод.
-
-## Свежие сигналы из X
-Выводи только если X релевантен запросу; иначе не выводи этот раздел.
-
-## On-chain данные
-Выводи только если тема крипто/on-chain; иначе не выводи этот раздел.
-
-## Источники
-Нумерованный список URL, которые ты реально использовал.`;
-}
+const PIPE_LABEL={research:'1. Grok — исследование (веб + X)',draft:'2. Claude — полный анализ',review:'3. GPT/Codex — внутренняя проверка',final:'4. Claude — решение для тебя'};
 async function copyGrokPrompt(){
-  const text=grokResearchPrompt(), btn=document.getElementById('copyGrokPrompt');
+  const btn=document.getElementById('copyGrokPrompt');
+  const r=await fetch('/api/grok_prompt',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({question:document.getElementById('pipeQ').value.trim()})});
+  const text=(await r.json()).prompt;
   try{ await navigator.clipboard.writeText(text); }
   catch(e){
     const ta=document.createElement('textarea'); ta.value=text;
@@ -1014,16 +1107,16 @@ async function copyGrokPrompt(){
 }
 async function runPipeline(){
   const question=document.getElementById('pipeQ').value.trim();
-  const research=document.getElementById('grokNotes').value.trim();
+  const research=GROK_MODE==='api' ? '' : document.getElementById('grokNotes').value.trim();
   const revision=document.getElementById('revisionNotes').value.trim();
   const out=document.getElementById('pipelineOut');
   const status=document.getElementById('pipelineStatus');
   const btn=document.getElementById('runPipeline');
   out.innerHTML=''; status.className='foot';
   if(!question){ status.textContent='Опиши, что нужно подготовить.'; return; }
-  if(!research){ status.textContent='Сначала вставь исследование из Grok со ссылками.'; return; }
+  if(GROK_MODE!=='api' && !research){ status.textContent='Сначала вставь исследование из Grok со ссылками.'; return; }
   btn.disabled=true;
-  status.textContent='Запускаю Claude → GPT/Codex → Claude…';
+  status.textContent=GROK_MODE==='api' ? 'Запускаю Grok → Claude → GPT/Codex → Claude…' : 'Запускаю Claude → GPT/Codex → Claude…';
   const cards={};
   try{
     const resp=await fetch('/api/pipeline',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -1259,6 +1352,12 @@ document.getElementById('claudeAuth').addEventListener('change',()=>{
 document.getElementById('testClaudeConnection').addEventListener('click',()=>changeClaudeConnection(true));
 document.getElementById('saveClaudeConnection').addEventListener('click',()=>changeClaudeConnection());
 document.getElementById('removeClaudeKey').addEventListener('click',()=>changeClaudeConnection(false,true));
+document.getElementById('grokAuth').addEventListener('change',()=>{
+  document.getElementById('grokKeyBox').hidden=document.getElementById('grokAuth').value!=='api';
+});
+document.getElementById('testGrokConnection').addEventListener('click',()=>changeConnection('grok',true));
+document.getElementById('saveGrokConnection').addEventListener('click',()=>changeConnection('grok'));
+document.getElementById('removeGrokKey').addEventListener('click',()=>changeConnection('grok',false,true));
 document.getElementById('gptAuth').addEventListener('change',()=>{
   document.getElementById('gptKeyBox').hidden=document.getElementById('gptAuth').value!=='api';
 });

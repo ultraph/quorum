@@ -18,7 +18,7 @@ def read(config_path):
 
 
 def save_claude(config_path, auth, key=None, remove=False, provider="anthropic"):
-    if provider not in ("anthropic", "openai"):
+    if provider not in ("anthropic", "openai", "xai"):
         raise ValueError("Unsupported connection provider")
     with _LOCK:
         data = read(config_path)

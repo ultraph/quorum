@@ -118,6 +118,93 @@ class ConnectionTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "cyber"):
                 q._api_anthropic(m, "question", True)
 
+    def test_xai_responses_use_web_and_x_search(self):
+        model = q.Model("grok", "xai", "grok-4.7", api_key="test-secret")
+        response = {"status": "completed", "usage": {"input_tokens": 300, "output_tokens": 90},
+                    "output": [{"type": "message", "content": [
+                        {"type": "output_text", "text": "research"}]}]}
+        with patch.object(q, "_http_json", return_value=response) as http:
+            self.assertEqual(q.call_model(model, "question", True), "research")
+            self.assertEqual(http.call_args.args[0], "https://api.x.ai/v1/responses")
+            self.assertEqual(http.call_args.args[1]["tools"], [{"type": "web_search"}, {"type": "x_search"}])
+            self.assertEqual(http.call_args.args[2]["Authorization"], "Bearer test-secret")
+        self.assertAlmostEqual(q.estimated_api_cost(model), (300 * 2.00 + 90 * 6.00) / 1_000_000)
+
+    def test_grok_key_check_and_manual_mode(self):
+        class Request:
+            def __init__(self, body):
+                self.body = body
+            headers = {"content-type": "application/json", "host": "quorum.test", "origin": "https://quorum.test"}
+
+            async def json(self):
+                return self.body
+
+        model = q.Model("grok", "xai", "grok-4.7", auth="api")
+        with patch.object(q, "load_config", return_value=SimpleNamespace(panel=[model])), \
+             patch.object(webapp.urllib.request, "urlopen") as upstream, \
+             patch.object(connections, "save_claude") as save:
+            upstream.return_value.__enter__.return_value.read.return_value = b'{}'
+            response = asyncio.run(webapp.grok_connection(Request({"auth": "api", "api_key": "test-secret"})))
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(upstream.call_args.args[0].full_url, "https://api.x.ai/v1/models/grok-4.7")
+            self.assertEqual(save.call_args.args[1:], ("api", "test-secret", False, "xai"))
+            # Grok has no CLI: "cli" is rejected, "manual" saves without a key check.
+            upstream.reset_mock()
+            response = asyncio.run(webapp.grok_connection(Request({"auth": "cli"})))
+            self.assertEqual(response.status_code, 400)
+            response = asyncio.run(webapp.grok_connection(Request({"auth": "manual"})))
+            self.assertEqual(response.status_code, 200)
+            upstream.assert_not_called()
+
+    def test_pipeline_runs_grok_when_no_research_pasted(self):
+        claude = q.Model("claude", "anthropic", "claude-opus-5-5", auth="cli")
+        gpt = q.Model("gpt", "openai", "gpt-6.1-sol", auth="cli")
+        grok = q.Model("grok", "xai", "grok-4.7", api_key="test-secret")
+        prompts = {}
+
+        def fake_run(m, prompt, web_tools=False):
+            prompts[m.provider] = prompts.get(m.provider, []) + [prompt]
+            m.answer = f"{m.provider} answer"
+            return m
+
+        class Request:
+            async def json(self):
+                return {"question": "Что нового?"}
+
+        async def collect():
+            response = await webapp.api_pipeline(Request())
+            return [json.loads(chunk[6:]) async for chunk in response.body_iterator]
+
+        with patch.object(q, "load_config", return_value=SimpleNamespace(panel=[claude, gpt, grok])), \
+             patch.object(q, "run_model", side_effect=fake_run), \
+             patch.object(webapp, "blockchain_evidence", return_value="none"):
+            events = asyncio.run(collect())
+        stages = [e["stage"] for e in events if e["type"] == "stage"]
+        self.assertEqual(stages, ["research", "draft", "review", "final"])
+        self.assertIn("Что нового?", prompts["xai"][0])
+        self.assertIn("xai answer", prompts["anthropic"][0])
+        self.assertTrue(events[-1]["ok"])
+
+    def test_pipeline_without_grok_key_asks_for_it(self):
+        claude = q.Model("claude", "anthropic", "claude-opus-5-5", auth="cli")
+        gpt = q.Model("gpt", "openai", "gpt-6.1-sol", auth="cli")
+        grok = q.Model("grok", "xai", "grok-4.7")
+
+        class Request:
+            async def json(self):
+                return {"question": "Что нового?"}
+
+        async def collect():
+            response = await webapp.api_pipeline(Request())
+            return [json.loads(chunk[6:]) async for chunk in response.body_iterator]
+
+        with patch.object(q, "load_config", return_value=SimpleNamespace(panel=[claude, gpt, grok])), \
+             patch.object(q, "run_model") as run:
+            events = asyncio.run(collect())
+        self.assertEqual(events[0]["type"], "error")
+        self.assertIn("xAI API key", events[0]["message"])
+        run.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

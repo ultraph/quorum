@@ -11,12 +11,14 @@
 осталась как свёрнутая «Ad-hoc panel» вверху страницы.
 
 ```
-Grok (вручную) → Claude: полный анализ → GPT/Codex: ревью → Claude: короткое решение
+Grok (xAI API) → Claude: полный анализ → GPT/Codex: ревью → Claude: короткое решение
 ```
 
-1. **Grok** — пока без API: пользователь жмёт «Copy prompt for Grok», отдаёт
-   промпт Grok и вставляет ответ (факты + URL) в поле 2. Grok отвечает за
-   X/Twitter: посты, даты публикаций, реакции, рекламные заявления.
+1. **Grok** (v3, с 18.10.2026) — по умолчанию через xAI Responses API
+   (`_api_xai_responses`, инструменты `web_search` + `x_search`, промпт
+   `GROK_RESEARCH`). Запасной режим `manual`: «Copy prompt for Grok» →
+   ответ вставляется в поле 2; вставленный текст всегда важнее API.
+   Grok отвечает за X/Twitter: посты, даты публикаций, реакции, рекламные заявления.
 2. **Claude №1** (`PIPELINE_DRAFT`) — полный внутренний анализ, с WebSearch/WebFetch,
    сам открывает источники и исправляет неподтверждённое.
 3. **GPT/Codex** (`PIPELINE_REVIEW`) — независимое ревью фактов, арифметики,
@@ -32,13 +34,15 @@ Grok (вручную) → Claude: полный анализ → GPT/Codex: ре�
 ## Код
 
 - `quorum.py` — модели (`Model`, `Config`), загрузка `~/.config/quorum/config.toml`,
-  вызовы провайдеров: CLI (`_cli_claude`, `_cli_codex`) и API (`_api_anthropic`,
+  вызовы провайдеров: CLI (`_cli_claude`, `_cli_codex`) и API (`_api_anthropic`, `_api_xai_responses`,
   `_api_openai_responses`, `_api_openai_compatible`, `_api_gemini`), судья,
   оценка API-цены (`api_price_estimate`), CLI-интерфейс и мастер `--setup`.
 - `webapp.py` — FastAPI + весь фронтенд в строке `INDEX_HTML` (HTML/CSS/JS).
   Эндпоинты: `/api/models`, `/api/ask` (панель, SSE), `/api/pipeline` (SSE),
-  `/api/connections/{claude,gpt}`. Промпты этапов — `PIPELINE_*`.
-- `connections.py` — переключение «подписка (CLI) ↔ API-ключ» из веба;
+  `/api/connections/{claude,gpt,grok}`, `/api/grok_prompt`. Промпты этапов —
+  `GROK_RESEARCH`, `PIPELINE_*`.
+- `connections.py` — переключение «подписка (CLI) ↔ API-ключ» (у Grok —
+  «API ↔ вручную») из веба;
   оверрайды в `connections.local.json` рядом с конфигом (вне Git).
 - `account_status.py` — статус входа и тариф CLI (Claude `auth status`,
   Codex `account/read`), кэш на минуту.
@@ -47,8 +51,8 @@ Grok (вручную) → Claude: полный анализ → GPT/Codex: ре�
 
 ## Договорённости с владельцем (не нарушать)
 
-- Основной контур — Claude + GPT. DeepSeek — резерв, по умолчанию выключен.
-  Kimi не используется. Модели: Claude Opus 5.5 (`claude-opus-5-5`) и
+- Основной контур — Grok (API) + Claude + GPT. DeepSeek — резерв, по умолчанию выключен.
+  Kimi не используется. Модели: Grok 4.7 (`grok-4.7`), Claude Opus 5.5 (`claude-opus-5-5`) и
   GPT-6.1 Sol, закреплены явно.
 - Claude/Codex проверяют **что** написано, а не **когда**: не открывать и не
   цитировать X-посты, не обсуждать их timestamp, HTTP 402 и т. п. — это зона Grok.
