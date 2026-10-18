@@ -482,6 +482,9 @@ GROK_RESEARCH = """\
 
 Формат ответа:
 
+Первая строка — тема запроса в 2–5 словах, без точки в конце, например:
+Тема: Призывы к «Чёрному понедельнику»
+
 ## Краткая карта исследования
 3–7 тезисов: что известно и что наиболее важно проверить дальше.
 
@@ -626,6 +629,8 @@ async def _execute(run: dict) -> None:
                                             run.get("reused_research") or run["research"],
                                             run.get("revision_prompt") or run["revision"] or "(none)"):
             run["events"].append(event)
+            if event.get("stage") == "research" and not event.get("reused_from"):
+                run["topic"] = run.get("topic") or runs.topic(event.get("answer", ""))
             if event["type"] == "done":
                 run["ok"] = event.get("ok")
             await asyncio.to_thread(runs.save, run)
@@ -673,6 +678,7 @@ async def api_pipeline(req: Request) -> StreamingResponse:
 
 
 async def _start(run: dict) -> StreamingResponse:
+    run["topic"] = run.get("topic") or runs.topic(run["research"])  # manual paste
     LIVE[run["id"]] = run
     await asyncio.to_thread(runs.save, run)
     task = asyncio.get_running_loop().create_task(_execute(run))
@@ -697,7 +703,7 @@ async def api_revise(run_id: str, req: Request):
     if not research or not final:
         return JSONResponse({"error": "У этого прогона нет готового исследования и финала — запусти его заново."}, status_code=400)
     run = runs.new(parent["question"], parent["research"], remarks)
-    run.update(parent=parent["id"], reused_research=research,
+    run.update(parent=parent["id"], reused_research=research, topic=parent.get("topic", ""),
                revision_prompt=f"{remarks}\n\n=== PREVIOUS FINAL ANSWER (the remarks refer to it) ===\n{final}")
     run["events"].append({"type": "revision", "text": remarks, "parent_created": parent["created"]})
     if "research" in stages:

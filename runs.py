@@ -12,9 +12,21 @@ _X_POST = re.compile(r"https?://(?:www\.)?(?:x|twitter)\.com/(\w+)\S*")
 _URL = re.compile(r"https?://(?:www\.)?([^/\s]+)\S*")
 
 
-def title(question: str) -> str:
-    """History label: an X link becomes just the account name, other links
-    their domain, so the gist of the question fits on one line."""
+_TOPIC = re.compile(r"^[\s*_#]*Тема:[\s*_]*(.+?)[\s*_.]*$", re.M)
+
+
+def topic(research: str) -> str:
+    """The 2–5 word topic Grok puts on the first line of its research."""
+    found = _TOPIC.search(research[:500])
+    return found.group(1)[:80] if found else ""
+
+
+def title(question: str, topic: str = "") -> str:
+    """History label: X account name + Grok's short topic. Without a topic,
+    links shrink to the account name / domain and the text is cut short."""
+    if topic:
+        handle = _X_POST.search(question)
+        return f"{handle.group(1)} · {topic}" if handle else topic
     text = _URL.sub(r"\1", _X_POST.sub(r"\1 ·", question))
     return " ".join(text.split()).strip(" ·")[:100]
 
@@ -63,6 +75,6 @@ def recent(limit: int = 30) -> list[dict]:
             run = json.loads(path.read_text())
         except (OSError, ValueError):
             continue
-        out.append({"id": run["id"], "created": run["created"], "title": title(run["question"]),
+        out.append({"id": run["id"], "created": run["created"], "title": title(run["question"], run.get("topic", "")),
                     "status": run["status"], "ok": run["ok"], "parent": run.get("parent")})
     return out

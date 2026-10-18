@@ -262,6 +262,14 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(runs.title("что тут? https://x.com/xai/status/1"), "что тут? xai")
         self.assertEqual(runs.title("см. https://www.coindesk.com/markets/2026/10/18/x что это?"), "см. coindesk.com что это?")
 
+    def test_history_title_uses_grok_topic(self):
+        research = "**Тема:** Призывы к «Чёрному понедельнику»\n\n## Краткая карта исследования\n..."
+        self.assertEqual(runs.topic(research), "Призывы к «Чёрному понедельнику»")
+        self.assertEqual(runs.topic("## Без темы"), "")
+        self.assertEqual(runs.title("https://x.com/KobeissiLetter/status/1\nдлинный текст", "Призывы к «Чёрному понедельнику»"),
+                         "KobeissiLetter · Призывы к «Чёрному понедельнику»")
+        self.assertEqual(runs.title("Что нового у xAI?", "Новости xAI"), "Новости xAI")
+
     def test_run_interrupted_by_restart_is_reported(self):
         run = runs.new("вопрос", "", "")
         runs.save(run)  # status "running", but no live task owns it
