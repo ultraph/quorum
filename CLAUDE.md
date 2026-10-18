@@ -7,8 +7,9 @@
 ## Что это
 
 Изначально — CLI «панель LLM + судья». С 15.10.2026 главный сценарий —
-**Research pipeline** (редакционно-фактчекинговый конвейер), старая панель
-осталась как свёрнутая «Ad-hoc panel» вверху страницы.
+**Research pipeline** (редакционно-фактчекинговый конвейер). Веб-«Ad-hoc panel»
+(панель + судья, `/api/ask`) вырезана 18.10.2026 по решению владельца — панель
+осталась только в CLI; вернуть можно из истории Git (до коммита удаления).
 
 ```
 Grok (xAI API) → Claude: полный анализ → GPT/Codex: ревью → Claude: короткое решение
@@ -38,7 +39,7 @@ Grok (xAI API) → Claude: полный анализ → GPT/Codex: ревью �
   `_api_openai_responses`, `_api_openai_compatible`, `_api_gemini`), судья,
   оценка API-цены (`api_price_estimate`), CLI-интерфейс и мастер `--setup`.
 - `webapp.py` — FastAPI + весь фронтенд в строке `INDEX_HTML` (HTML/CSS/JS).
-  Эндпоинты: `/api/models`, `/api/ask` (панель, SSE), `/api/pipeline` (SSE),
+  Эндпоинты: `/api/models`, `/api/pipeline` (SSE),
   `/api/connections/{claude,gpt,grok}`, `/api/grok_prompt`, `/api/runs[/{id}[/stream|/revise]]`. Промпты этапов —
   `GROK_RESEARCH`, `PIPELINE_*`.
 - `connections.py` — переключение «подписка (CLI) ↔ API-ключ» (у Grok —

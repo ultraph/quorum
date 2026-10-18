@@ -149,8 +149,8 @@ key belongs in a systemd environment file, never in a prompt or Git. Grok owns
 X-post recency/timestamps and promotional-post collection; Claude and Codex
 focus their checks on substantive claims. Addresses must always be full `0x` +
 40 hexadecimal characters; a truncated address is not guessed.
-The old free-form multi-model panel remains available in a collapsed **Ad-hoc
-panel** section.
+The web UI is the pipeline only; the free-form multi-model panel with a judge
+remains available from the command line (`quorum "question"`).
 
 ```bash
 pip install -r requirements-web.txt   # one-time; the CLI itself stays dependency-free
