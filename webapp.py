@@ -779,6 +779,10 @@ INDEX_HTML = r"""<!doctype html>
   .banner.warn { color:var(--judge); border-color:var(--judge); }
   .banner.err { color:var(--err); border-color:var(--err); }
 
+  .chips { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0 0; }
+  .chip { background:var(--inbg); color:var(--dim); border:1px solid var(--line); border-radius:16px;
+          padding:4px 11px; font-size:13px; font-weight:500; }
+  .chip:hover:not(:disabled) { color:var(--txt); border-color:var(--acc); filter:none; }
   .ghost { background:var(--inbg); color:var(--txt); border:1px solid var(--line);
            font-weight:500; padding:7px 12px; font-size:13px; }
   .ghost:hover:not(:disabled) { background:var(--hover); filter:none; }
@@ -877,7 +881,8 @@ INDEX_HTML = r"""<!doctype html>
       </details>
     </details>
     <label>1. Что нужно подготовить?</label>
-    <textarea id="pipeQ" placeholder="Например: подготовь проверенный разбор новости…"></textarea>
+    <textarea id="pipeQ" placeholder="Опиши задачу или выбери пример ниже…"></textarea>
+    <div class="chips" id="pipeExamples"></div>
     <div id="grokApiNote" class="foot" style="margin-top:14px">2. Исследование: Grok выполнит его сам через xAI API — поиск в вебе и в X.</div>
     <div id="grokManualBox" hidden>
     <label style="margin-top:14px">2. Исследование из Grok <span style="font-weight:400">— вставь текст, посты и URL источников</span></label>
@@ -1018,6 +1023,31 @@ async function changeConnection(provider,testOnly=false,remove=false){
 }
 
 const PIPE_LABEL={research:'1. Grok — исследование (веб + X)',draft:'2. Claude — полный анализ',review:'3. GPT/Codex — внутренняя проверка',final:'4. Claude — решение для тебя'};
+// Clickable starters for field 1; the first [placeholder] gets selected so
+// typing replaces it straight away.
+const PIPE_EXAMPLES=[
+  ['Разбор твита','Разбери твит: [ссылка на пост в X]\nЧто это значит, что вообще происходит и к чему готовиться?'],
+  ['Я держатель','У меня [количество] монет [токен]. Что эта новость значит для меня лично как для держателя?\n[ссылка или текст новости]'],
+  ['Проверка проекта','Проверь проект [название или полный адрес контракта]: кто за ним стоит, что с аудитом и холдерами, есть ли признаки скама?'],
+  ['Что говорят в X','Что сейчас говорят в X про [токен или тему]? Главные сигналы, реакции и кто их задаёт за последние сутки.'],
+  ['Правда ли…','Правда ли, что [утверждение]? Найди первоисточник и скажи, насколько этому можно верить.'],
+  ['Сравнение','Сравни [вариант A] и [вариант B] для [моей задачи]: что выгоднее и в чём риски?'],
+];
+function useExample(text){
+  const ta=document.getElementById('pipeQ');
+  ta.value=text; ta.focus();
+  const a=text.indexOf('['), b=text.indexOf(']',a);
+  if(a>=0 && b>a) ta.setSelectionRange(a,b+1);
+}
+function renderExamples(){
+  const box=document.getElementById('pipeExamples');
+  PIPE_EXAMPLES.forEach(([label,text])=>{
+    const b=document.createElement('button'); b.type='button'; b.className='chip';
+    b.textContent=label; b.title=text; b.addEventListener('click',()=>useExample(text));
+    box.appendChild(b);
+  });
+}
+renderExamples();
 async function copyGrokPrompt(){
   const btn=document.getElementById('copyGrokPrompt');
   const r=await fetch('/api/grok_prompt',{method:'POST',headers:{'Content-Type':'application/json'},
