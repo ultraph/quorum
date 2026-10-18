@@ -10,10 +10,18 @@ import urllib.error
 
 import connections
 import quorum as q
+import runs
 import webapp
 
 
 class ConnectionTests(unittest.TestCase):
+    def setUp(self):
+        runs_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(runs_dir.cleanup)
+        patcher = patch.dict(os.environ, {"QUORUM_RUNS_DIR": runs_dir.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_openai_override_is_independent(self):
         with tempfile.TemporaryDirectory() as td:
             config = Path(td) / "config.toml"
@@ -180,7 +188,7 @@ class ConnectionTests(unittest.TestCase):
 
         async def collect():
             response = await webapp.api_pipeline(Request())
-            return [json.loads(chunk[6:]) async for chunk in response.body_iterator]
+            return [json.loads(chunk[6:]) async for chunk in response.body_iterator][1:]
 
         with patch.object(q, "load_config", return_value=SimpleNamespace(panel=[claude, gpt, grok])), \
              patch.object(q, "run_model", side_effect=fake_run), \
@@ -191,6 +199,24 @@ class ConnectionTests(unittest.TestCase):
         self.assertIn("Что нового?", prompts["xai"][0])
         self.assertIn("xai answer", prompts["anthropic"][0])
         self.assertTrue(events[-1]["ok"])
+
+        # A page reload re-attaches to the stored run and replays the same log.
+        stored = runs.recent()
+        self.assertEqual([(r["status"], r["ok"], r["question"]) for r in stored], [("done", True, "Что нового?")])
+
+        async def replay():
+            response = await webapp.api_run_stream(stored[0]["id"])
+            return [json.loads(chunk[6:]) async for chunk in response.body_iterator][1:]
+        self.assertEqual(asyncio.run(replay()), events)
+        self.assertEqual(os.stat(runs.runs_dir() / f"{stored[0]['id']}.json").st_mode & 0o777, 0o600)
+
+    def test_run_interrupted_by_restart_is_reported(self):
+        run = runs.new("вопрос", "", "")
+        runs.save(run)  # status "running", but no live task owns it
+        restored = webapp._stored_run(run["id"])
+        self.assertEqual(restored["status"], "done")
+        self.assertIn("перезапуском", restored["events"][-1]["message"])
+        self.assertIsNone(webapp._stored_run("../../etc/passwd"))
 
     def test_pipeline_without_grok_key_asks_for_it(self):
         claude = q.Model("claude", "anthropic", "claude-opus-5-5", auth="cli")
@@ -203,7 +229,7 @@ class ConnectionTests(unittest.TestCase):
 
         async def collect():
             response = await webapp.api_pipeline(Request())
-            return [json.loads(chunk[6:]) async for chunk in response.body_iterator]
+            return [json.loads(chunk[6:]) async for chunk in response.body_iterator][1:]
 
         with patch.object(q, "load_config", return_value=SimpleNamespace(panel=[claude, gpt, grok])), \
              patch.object(q, "run_model") as run:

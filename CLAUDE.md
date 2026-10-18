@@ -39,11 +39,16 @@ Grok (xAI API) → Claude: полный анализ → GPT/Codex: ревью �
   оценка API-цены (`api_price_estimate`), CLI-интерфейс и мастер `--setup`.
 - `webapp.py` — FastAPI + весь фронтенд в строке `INDEX_HTML` (HTML/CSS/JS).
   Эндпоинты: `/api/models`, `/api/ask` (панель, SSE), `/api/pipeline` (SSE),
-  `/api/connections/{claude,gpt,grok}`, `/api/grok_prompt`. Промпты этапов —
+  `/api/connections/{claude,gpt,grok}`, `/api/grok_prompt`, `/api/runs[/{id}[/stream]]`. Промпты этапов —
   `GROK_RESEARCH`, `PIPELINE_*`.
 - `connections.py` — переключение «подписка (CLI) ↔ API-ключ» (у Grok —
   «API ↔ вручную») из веба;
   оверрайды в `connections.local.json` рядом с конфигом (вне Git).
+- `runs.py` — история прогонов pipeline: каждый прогон — JSON-файл
+  (`~/.local/state/quorum/runs`, последние 200). Прогон идёт серверной задачей
+  (`_execute`), браузер лишь подписывается на лог событий (`/api/runs/{id}/stream`),
+  поэтому обновление страницы ничего не сбрасывает. Каждый этап пишет строку
+  `pipeline stage=…` (время, цена, поиски) в журнал сервиса.
 - `account_status.py` — статус входа и тариф CLI (Claude `auth status`,
   Codex `account/read`), кэш на минуту.
 - `test_connections.py` — тесты: `python -m unittest test_connections -v`

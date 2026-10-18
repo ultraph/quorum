@@ -27,6 +27,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 import quorum as q
 from account_status import account_status
 import connections
+import runs
 
 app = FastAPI(title="quorum")
 
@@ -536,89 +537,166 @@ def _stage_event(stage: str, m: q.Model) -> dict:
             "cost_usd": q.estimated_api_cost(m)}
 
 
+async def _pipeline_events(question: str, research: str, revision: str):
+    """Grok research (xAI API or manual paste) → Claude draft → GPT review → Claude final."""
+    if not question:
+        yield {"type": "error", "message": "Enter the request."}
+        return
+
+    cfg = q.load_config()
+    claude = next((m for m in cfg.panel if m.enabled and m.provider == "anthropic"), None)
+    gpt = next((m for m in cfg.panel if m.enabled and m.provider == "openai"), None)
+    grok = next((m for m in cfg.panel if m.enabled and m.provider == "xai"), None)
+    if claude is None or gpt is None:
+        missing = "Claude" if claude is None else "GPT/Codex"
+        yield {"type": "error", "message": f"{missing} is not enabled in the Quorum config."}
+        return
+
+    loop = asyncio.get_running_loop()
+    stages = []
+
+    # Pasted research always wins; otherwise Grok researches via the xAI API.
+    if not research:
+        if grok is None or grok.auth != "api" or not grok.api_key:
+            yield {"type": "error", "message":
+                   "Grok API не подключён: добавь xAI API key в «Подключение Grok» или вставь исследование вручную в поле 2."}
+            return
+        yield {"type": "stage_start", "stage": "research", "name": grok.name,
+               "provider": grok.provider, "model": grok.model}
+        research_result = await loop.run_in_executor(
+            None, q.run_model, grok, grok_research_prompt(question), True)
+        stages.append(research_result)
+        yield _stage_event("research", research_result)
+        if research_result.error:
+            yield {"type": "done", "ok": False}
+            return
+        research = research_result.answer
+
+    yield {"type": "info", "message": "Проверяю полные EVM-адреса через Blockscout…"}
+    chain_evidence = await loop.run_in_executor(
+        None, blockchain_evidence, f"{question}\n{research}")
+
+    prompt = PIPELINE_DRAFT.format(question=question, research=research,
+                                   revision=revision, chain_evidence=chain_evidence)
+    yield {"type": "stage_start", "stage": "draft", "name": claude.name,
+           "provider": claude.provider, "model": claude.model}
+    draft_result = await loop.run_in_executor(None, q.run_model, claude, prompt, True)
+    stages.append(draft_result)
+    yield _stage_event("draft", draft_result)
+    if draft_result.error:
+        yield {"type": "done", "ok": False}
+        return
+
+    prompt = PIPELINE_REVIEW.format(question=question, research=research,
+                                    draft=draft_result.answer, chain_evidence=chain_evidence)
+    yield {"type": "stage_start", "stage": "review", "name": gpt.name,
+           "provider": gpt.provider, "model": gpt.model}
+    review_result = await loop.run_in_executor(None, q.run_model, gpt, prompt, True)
+    stages.append(review_result)
+    yield _stage_event("review", review_result)
+    if review_result.error:
+        yield {"type": "done", "ok": False}
+        return
+
+    prompt = PIPELINE_FINAL.format(question=question, research=research,
+                                   draft=draft_result.answer, review=review_result.answer,
+                                   revision=revision, chain_evidence=chain_evidence)
+    yield {"type": "stage_start", "stage": "final", "name": claude.name,
+           "provider": claude.provider, "model": claude.model}
+    final_result = await loop.run_in_executor(None, q.run_model, replace(claude), prompt, True)
+    stages.append(final_result)
+    yield _stage_event("final", final_result)
+    costs = [q.estimated_api_cost(m) for m in stages]
+    yield {"type": "done", "ok": not bool(final_result.error),
+           "total_cost_usd": sum(c for c in costs if c is not None),
+           "cost_est": any(m.tokens_est for m in stages)}
+
+
+# Runs execute as server tasks, independent of the browser tab: a reload only
+# re-attaches to the stored event log. LIVE holds runs still in progress.
+LIVE: dict[str, dict] = {}
+TASKS: set[asyncio.Task] = set()
+
+
+async def _execute(run: dict) -> None:
+    try:
+        async for event in _pipeline_events(run["question"], run["research"],
+                                            run["revision"] or "(none)"):
+            run["events"].append(event)
+            if event["type"] == "done":
+                run["ok"] = event.get("ok")
+            await asyncio.to_thread(runs.save, run)
+    except Exception as exc:  # noqa: BLE001 — record, never lose the run
+        run["events"].append({"type": "error", "message": f"Pipeline crashed: {exc}"[:400]})
+    finally:
+        run["status"] = "done"
+        if run["ok"] is None:
+            run["ok"] = False
+        await asyncio.to_thread(runs.save, run)
+        LIVE.pop(run["id"], None)
+
+
+def _stored_run(run_id: str) -> dict | None:
+    run = LIVE.get(run_id) or runs.load(run_id)
+    if run and run["status"] == "running" and run_id not in LIVE:
+        # The service restarted mid-run; the task that owned it is gone.
+        run = {**run, "status": "done", "ok": False,
+               "events": run["events"] + [{"type": "error", "message": "Прогон прерван перезапуском сервиса."}]}
+    return run
+
+
+async def _tail(run: dict):
+    yield _sse({"type": "run", "id": run["id"]})
+    sent = 0
+    while True:
+        while sent < len(run["events"]):
+            yield _sse(run["events"][sent])
+            sent += 1
+        if run["status"] != "running":
+            return
+        await asyncio.sleep(0.5)
+
+
 @app.post("/api/pipeline")
 async def api_pipeline(req: Request) -> StreamingResponse:
-    """Grok research (xAI API or manual paste) → Claude draft → GPT review → Claude final."""
     body = await req.json()
-    question = (body.get("question") or "").strip()
-    research = (body.get("research") or "").strip()
-    revision = (body.get("revision") or "").strip() or "(none)"
-
-    async def gen():
-        nonlocal research
-        if not question:
+    if not (body.get("question") or "").strip():
+        async def rejected():
             yield _sse({"type": "error", "message": "Enter the request."})
-            return
+        return StreamingResponse(rejected(), media_type="text/event-stream")
+    run = runs.new((body.get("question") or "").strip(), (body.get("research") or "").strip(),
+                   (body.get("revision") or "").strip())
+    LIVE[run["id"]] = run
+    await asyncio.to_thread(runs.save, run)
+    task = asyncio.get_running_loop().create_task(_execute(run))
+    TASKS.add(task)  # the loop keeps only weak references to tasks
+    task.add_done_callback(TASKS.discard)
+    return StreamingResponse(_tail(run), media_type="text/event-stream")
 
-        cfg = q.load_config()
-        claude = next((m for m in cfg.panel if m.enabled and m.provider == "anthropic"), None)
-        gpt = next((m for m in cfg.panel if m.enabled and m.provider == "openai"), None)
-        grok = next((m for m in cfg.panel if m.enabled and m.provider == "xai"), None)
-        if claude is None or gpt is None:
-            missing = "Claude" if claude is None else "GPT/Codex"
-            yield _sse({"type": "error", "message": f"{missing} is not enabled in the Quorum config."})
-            return
 
-        loop = asyncio.get_running_loop()
-        stages = []
+@app.get("/api/runs")
+async def api_runs() -> JSONResponse:
+    items = await asyncio.to_thread(runs.recent)
+    for item in items:
+        if item["status"] == "running" and item["id"] not in LIVE:
+            item["status"], item["ok"] = "done", False
+    return JSONResponse({"runs": items})
 
-        # Pasted research always wins; otherwise Grok researches via the xAI API.
-        if not research:
-            if grok is None or grok.auth != "api" or not grok.api_key:
-                yield _sse({"type": "error", "message":
-                            "Grok API не подключён: добавь xAI API key в «Подключение Grok» или вставь исследование вручную в поле 2."})
-                return
-            yield _sse({"type": "stage_start", "stage": "research", "name": grok.name,
-                        "provider": grok.provider, "model": grok.model})
-            research_result = await loop.run_in_executor(
-                None, q.run_model, grok, grok_research_prompt(question), True)
-            stages.append(research_result)
-            yield _sse(_stage_event("research", research_result))
-            if research_result.error:
-                yield _sse({"type": "done", "ok": False})
-                return
-            research = research_result.answer
 
-        yield _sse({"type": "info", "message": "Проверяю полные EVM-адреса через Blockscout…"})
-        chain_evidence = await loop.run_in_executor(
-            None, blockchain_evidence, f"{question}\n{research}")
+@app.get("/api/runs/{run_id}")
+async def api_run(run_id: str) -> JSONResponse:
+    run = _stored_run(run_id)
+    if run is None:
+        return JSONResponse({"error": "Прогон не найден."}, status_code=404)
+    return JSONResponse({k: run[k] for k in ("id", "created", "question", "research", "revision", "status")})
 
-        prompt = PIPELINE_DRAFT.format(question=question, research=research,
-                                       revision=revision, chain_evidence=chain_evidence)
-        yield _sse({"type": "stage_start", "stage": "draft", "name": claude.name,
-                    "provider": claude.provider, "model": claude.model})
-        draft_result = await loop.run_in_executor(None, q.run_model, claude, prompt, True)
-        stages.append(draft_result)
-        yield _sse(_stage_event("draft", draft_result))
-        if draft_result.error:
-            yield _sse({"type": "done", "ok": False})
-            return
 
-        prompt = PIPELINE_REVIEW.format(question=question, research=research,
-                                        draft=draft_result.answer, chain_evidence=chain_evidence)
-        yield _sse({"type": "stage_start", "stage": "review", "name": gpt.name,
-                    "provider": gpt.provider, "model": gpt.model})
-        review_result = await loop.run_in_executor(None, q.run_model, gpt, prompt, True)
-        stages.append(review_result)
-        yield _sse(_stage_event("review", review_result))
-        if review_result.error:
-            yield _sse({"type": "done", "ok": False})
-            return
-
-        prompt = PIPELINE_FINAL.format(question=question, research=research,
-                                       draft=draft_result.answer, review=review_result.answer,
-                                       revision=revision, chain_evidence=chain_evidence)
-        yield _sse({"type": "stage_start", "stage": "final", "name": claude.name,
-                    "provider": claude.provider, "model": claude.model})
-        final_result = await loop.run_in_executor(None, q.run_model, replace(claude), prompt, True)
-        stages.append(final_result)
-        yield _sse(_stage_event("final", final_result))
-        costs = [q.estimated_api_cost(m) for m in stages]
-        yield _sse({"type": "done", "ok": not bool(final_result.error),
-                    "total_cost_usd": sum(c for c in costs if c is not None),
-                    "cost_est": any(m.tokens_est for m in stages)})
-
-    return StreamingResponse(gen(), media_type="text/event-stream")
+@app.get("/api/runs/{run_id}/stream")
+async def api_run_stream(run_id: str):
+    run = _stored_run(run_id)
+    if run is None:
+        return JSONResponse({"error": "Прогон не найден."}, status_code=404)
+    return StreamingResponse(_tail(run), media_type="text/event-stream")
 
 
 INDEX_HTML = r"""<!doctype html>
@@ -822,6 +900,8 @@ INDEX_HTML = r"""<!doctype html>
   <div class="card">
     <h2 style="margin:0 0 5px;font-size:18px">Research pipeline</h2>
     <div class="foot" style="margin:0 0 16px">Grok сам ищет свежие данные в вебе и X через xAI API, затем Claude и GPT проверяют и решают. Ручная вставка ответа Grok осталась как запасной режим.</div>
+    <div class="row" style="margin:0 0 12px"><label for="runHistory" style="margin:0">История прогонов</label>
+      <select id="runHistory" style="flex:1;min-width:0"></select></div>
     <div id="pipelineModels" class="pipeline-models">Загружаю выбранные модели…</div>
     <details class="pipeline-models" id="grokConnectionSettings">
       <summary style="cursor:pointer">Подключение Grok: API / вручную</summary>
@@ -1118,22 +1198,34 @@ async function copyGrokPrompt(){
   document.getElementById('pipelineStatus').textContent='Вставь prompt в Grok, затем скопируй его полный ответ в поле 2.';
   setTimeout(()=>{ btn.textContent=old; },1800);
 }
-async function runPipeline(){
-  const question=document.getElementById('pipeQ').value.trim();
-  const research=GROK_MODE==='api' ? '' : document.getElementById('grokNotes').value.trim();
-  const revision=document.getElementById('revisionNotes').value.trim();
+function pipelineInputs(run){
+  document.getElementById('pipeQ').value=run.question||'';
+  document.getElementById('grokNotes').value=run.research||'';
+  document.getElementById('revisionNotes').value=run.revision||'';
+}
+function rememberRun(id){
+  try{ if(id) localStorage.setItem('lastRun',id); else localStorage.removeItem('lastRun'); }catch(e){}
+}
+async function loadRunHistory(selected){
+  const sel=document.getElementById('runHistory');
+  try{
+    const data=await (await fetch('/api/runs')).json();
+    sel.innerHTML='<option value="">— новый прогон —</option>'+data.runs.map(r=>{
+      const mark=r.status==='running'?'⏳ ':r.ok?'✓ ':'✗ ';
+      return `<option value="${esc(r.id)}">${mark}${esc(r.created)} · ${esc(r.question.slice(0,70))}</option>`;
+    }).join('');
+    sel.value=selected||'';
+  }catch(e){}
+}
+// Render one stored or live event stream into the result area.
+async function followRun(resp){
   const out=document.getElementById('pipelineOut');
   const status=document.getElementById('pipelineStatus');
   const btn=document.getElementById('runPipeline');
-  out.innerHTML=''; status.className='foot';
-  if(!question){ status.textContent='Опиши, что нужно подготовить.'; return; }
-  if(GROK_MODE!=='api' && !research){ status.textContent='Сначала вставь исследование из Grok со ссылками.'; return; }
-  btn.disabled=true;
-  status.textContent=GROK_MODE==='api' ? 'Запускаю Grok → Claude → GPT/Codex → Claude…' : 'Запускаю Claude → GPT/Codex → Claude…';
   const cards={};
+  out.innerHTML=''; status.className='foot';
+  btn.disabled=true;
   try{
-    const resp=await fetch('/api/pipeline',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({question:question,research:research,revision:revision})});
     if(!resp.ok || !resp.body) throw new Error('Pipeline request failed ('+resp.status+')');
     const reader=resp.body.getReader(), dec=new TextDecoder(); let buf='';
     while(true){
@@ -1143,7 +1235,9 @@ async function runPipeline(){
         const line=buf.slice(0,i); buf=buf.slice(i+2);
         if(!line.startsWith('data: ')) continue;
         const o=JSON.parse(line.slice(6));
-        if(o.type==='stage_start'){
+        if(o.type==='run'){
+          rememberRun(o.id); loadRunHistory(o.id);
+        } else if(o.type==='stage_start'){
           const d=card(`<h3>${esc(PIPE_LABEL[o.stage]||o.stage)}</h3><pre class="spin">${esc(o.name)} is working<span class="dots"></span></pre>`,o.stage==='final'?'judge':'');
           cards[o.stage]=d; out.appendChild(d);
         } else if(o.type==='stage'){
@@ -1183,7 +1277,30 @@ async function runPipeline(){
       }
     }
   }catch(e){ status.innerHTML=`<span class="banner err">✗ ${esc(String(e.message||e))}</span>`; }
-  finally{ btn.disabled=false; }
+  finally{ btn.disabled=false; loadRunHistory(document.getElementById('runHistory').value); }
+}
+async function openRun(id){
+  const status=document.getElementById('pipelineStatus');
+  const r=await fetch('/api/runs/'+encodeURIComponent(id));
+  if(!r.ok){ rememberRun(''); return; }
+  const run=await r.json();
+  pipelineInputs(run); rememberRun(id);
+  if(run.status==='running') status.textContent='Прогон ещё идёт — показываю его вживую…';
+  await followRun(await fetch('/api/runs/'+encodeURIComponent(id)+'/stream'));
+}
+async function runPipeline(){
+  const question=document.getElementById('pipeQ').value.trim();
+  const research=GROK_MODE==='api' ? '' : document.getElementById('grokNotes').value.trim();
+  const revision=document.getElementById('revisionNotes').value.trim();
+  const status=document.getElementById('pipelineStatus');
+  status.className='foot';
+  if(!question){ status.textContent='Опиши, что нужно подготовить.'; return; }
+  if(GROK_MODE!=='api' && !research){ status.textContent='Сначала вставь исследование из Grok со ссылками.'; return; }
+  const resp=fetch('/api/pipeline',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({question:question,research:research,revision:revision})});
+  status.textContent=GROK_MODE==='api' ? 'Запускаю Grok → Claude → GPT/Codex → Claude…' : 'Запускаю Claude → GPT/Codex → Claude…';
+  try{ await followRun(await resp); }
+  catch(e){ status.innerHTML=`<span class="banner err">✗ ${esc(String(e.message||e))}</span>`; }
 }
 
 // Tiny self-contained Markdown → HTML (no external deps). Text is HTML-escaped
@@ -1357,6 +1474,15 @@ async function ask(){
 document.getElementById('ask').addEventListener('click',ask);
 document.getElementById('runPipeline').addEventListener('click',runPipeline);
 document.getElementById('copyGrokPrompt').addEventListener('click',copyGrokPrompt);
+document.getElementById('runHistory').addEventListener('change',ev=>{
+  if(ev.target.value) openRun(ev.target.value);
+  else { rememberRun(''); pipelineInputs({}); document.getElementById('pipelineOut').innerHTML=''; document.getElementById('pipelineStatus').textContent=''; }
+});
+(async()=>{
+  let last=''; try{ last=localStorage.getItem('lastRun')||''; }catch(e){}
+  await loadRunHistory(last);
+  if(last) openRun(last);
+})();
 loadPipelineModels();
 setInterval(loadPipelineModels,60000);
 document.getElementById('claudeAuth').addEventListener('change',()=>{
@@ -1396,7 +1522,9 @@ applyTheme(curTheme());   // sync the icon with the theme set before paint
 themeBtn.addEventListener('click',()=>applyTheme(curTheme()==='light'?'dark':'light'));
 
 document.getElementById('home').addEventListener('click', function(){
-  // Reset research pipeline
+  // Reset research pipeline (stored runs stay in the history list)
+  rememberRun('');
+  document.getElementById('runHistory').value = '';
   document.getElementById('pipeQ').value = '';
   document.getElementById('grokNotes').value = '';
   document.getElementById('revisionNotes').value = '';
