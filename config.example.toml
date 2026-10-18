@@ -45,7 +45,7 @@ enabled = true
 [[panel]]
 name = "grok"
 provider = "xai"
-model = "grok-4.7"
+model = "grok-4.3"             # cheaper tokens; grok-4.7 is the flagship
 auth = "api"
 api_key = "env:XAI_API_KEY"
 enabled = true

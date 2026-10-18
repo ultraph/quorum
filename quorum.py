@@ -111,6 +111,7 @@ class Model:
     tokens_out: int = 0      # completion tokens
     tokens_est: bool = False # True when counts are a char-based estimate (CLI)
     cost_usd: float | None = None  # exact billed cost when the provider reports it (xAI)
+    x_search: bool = True    # xAI only: allow the paid X search tool on web-tool runs
 
 
 @dataclass
@@ -130,6 +131,7 @@ _API_PRICE_ESTIMATES: dict[tuple[str, str], tuple[str, float, float]] = {
     ("openai", "gpt-5.6-terra"): ("GPT-5.6 Terra", 2.00, 12.00),
     ("openai", "gpt-6.1-sol"): ("GPT-6.1 Sol", 2.00, 10.00),
     ("xai", "grok-4.7"): ("Grok 4.7", 2.00, 6.00),
+    ("xai", "grok-4.3"): ("Grok 4.3", 1.25, 2.50),
 }
 
 
@@ -351,13 +353,21 @@ def _api_openai_responses(m: Model, prompt: str, web_tools: bool = False) -> str
     return _responses_call(m, "https://api.openai.com/v1/responses", payload, "OpenAI")
 
 
+XAI_MAX_TURNS = 5
+
+
 def _api_xai_responses(m: Model, prompt: str, web_tools: bool = False) -> str:
     """Grok through xAI's Responses API; x_search is what makes Grok the X researcher."""
     if not m.api_key:
         raise RuntimeError("no xAI API key")
     payload = {"model": m.model, "input": prompt, "store": False}
     if web_tools:
-        payload["tools"] = [{"type": "web_search"}, {"type": "x_search"}]
+        payload["tools"] = [{"type": "web_search"}]
+        if m.x_search:
+            payload["tools"].append({"type": "x_search"})
+        # Every search round re-reads the whole growing context, and X posts are
+        # billed per item fetched, so cap the server-side tool rounds.
+        payload["max_turns"] = XAI_MAX_TURNS
     return _responses_call(m, "https://api.x.ai/v1/responses", payload, "xAI")
 
 
