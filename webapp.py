@@ -805,6 +805,7 @@ INDEX_HTML = r"""<!doctype html>
   .pipeline-models { margin:0 0 16px; padding:10px 12px; border:1px solid var(--line);
     border-radius:8px; background:var(--inbg); color:var(--dim); font-size:13px; }
   .pipeline-models strong { color:var(--txt); }
+  .pipeline-models.conn { margin:8px 0 0; background:var(--panel); }
   .cost-total { margin-top:16px; padding:16px 18px; border:1px solid var(--ok);
     border-radius:10px; background:color-mix(in srgb, var(--ok) 10%, var(--panel)); }
   .cost-total .amount { color:var(--ok); font-size:26px; font-weight:750; line-height:1.15; }
@@ -933,75 +934,78 @@ INDEX_HTML = r"""<!doctype html>
     <div class="foot" style="margin:0 0 16px">Grok сам ищет свежие данные в вебе и X через xAI API, затем Claude и GPT проверяют и решают. Ручная вставка ответа Grok осталась как запасной режим.</div>
     <div class="row" style="margin:0 0 12px"><label for="runHistory" style="margin:0">История прогонов</label>
       <select id="runHistory" style="flex:1;min-width:0"></select></div>
-    <div id="pipelineModels" class="pipeline-models">Загружаю выбранные модели…</div>
-    <details class="pipeline-models" id="grokConnectionSettings">
-      <summary style="cursor:pointer">Подключение Grok: API / вручную</summary>
-      <div style="margin-top:12px">
-        <label for="grokAuth">Способ подключения</label>
-        <select id="grokAuth">
-          <option value="api">xAI API · Grok ищет сам (веб + X)</option>
-          <option value="manual">Вручную · вставить ответ Grok в поле 2</option>
-        </select>
-        <div id="grokKeyBox" style="margin-top:10px" hidden>
-          <label for="grokApiKey">xAI API key</label>
-          <input id="grokApiKey" type="password" autocomplete="new-password" placeholder="Введите ключ; оставьте пустым, чтобы использовать сохранённый" style="width:100%">
-          <div class="foot" id="grokKeyState"></div>
-          <div class="foot">Ключ создаётся в console.x.ai. API оплачивается отдельно от подписки SuperGrok: токены плюс поиск ($5 за 1 000 веб-поисков, $5 за 1 000 найденных постов X).</div>
+    <details class="pipeline-models" id="modelsPanel">
+      <summary id="modelsSummary" style="cursor:pointer">Загружаю выбранные модели…</summary>
+      <div id="pipelineModels"></div>
+      <details class="pipeline-models conn" id="grokConnectionSettings">
+        <summary style="cursor:pointer">Подключение Grok: API / вручную</summary>
+        <div style="margin-top:12px">
+          <label for="grokAuth">Способ подключения</label>
+          <select id="grokAuth">
+            <option value="api">xAI API · Grok ищет сам (веб + X)</option>
+            <option value="manual">Вручную · вставить ответ Grok в поле 2</option>
+          </select>
+          <div id="grokKeyBox" style="margin-top:10px" hidden>
+            <label for="grokApiKey">xAI API key</label>
+            <input id="grokApiKey" type="password" autocomplete="new-password" placeholder="Введите ключ; оставьте пустым, чтобы использовать сохранённый" style="width:100%">
+            <div class="foot" id="grokKeyState"></div>
+            <div class="foot">Ключ создаётся в console.x.ai. API оплачивается отдельно от подписки SuperGrok: токены плюс поиск ($5 за 1 000 веб-поисков, $5 за 1 000 найденных постов X).</div>
+          </div>
+          <div class="row" style="margin-top:12px">
+            <button type="button" id="testGrokConnection" class="ghost">Проверить подключение</button>
+            <button type="button" id="saveGrokConnection">Сохранить</button>
+            <button type="button" id="removeGrokKey" class="ghost">Удалить сохранённый API key</button>
+          </div>
+          <div class="foot" id="grokConnectionStatus" role="status"></div>
+          <div class="foot">Модель сохраняется. Изменение действует со следующего запуска и общее для этой установки Quorum.</div>
         </div>
-        <div class="row" style="margin-top:12px">
-          <button type="button" id="testGrokConnection" class="ghost">Проверить подключение</button>
-          <button type="button" id="saveGrokConnection">Сохранить</button>
-          <button type="button" id="removeGrokKey" class="ghost">Удалить сохранённый API key</button>
+      </details>
+      <details class="pipeline-models conn" id="connectionSettings">
+        <summary style="cursor:pointer">Подключение Claude: подписка / API</summary>
+        <div style="margin-top:12px">
+          <label for="claudeAuth">Способ подключения</label>
+          <select id="claudeAuth">
+            <option value="cli">Подписка Claude · Claude Code CLI</option>
+            <option value="api">Anthropic API · оплата по токенам</option>
+          </select>
+          <div id="claudeKeyBox" style="margin-top:10px" hidden>
+            <label for="claudeApiKey">Anthropic API key</label>
+            <input id="claudeApiKey" type="password" autocomplete="new-password" placeholder="Введите ключ; оставьте пустым, чтобы использовать сохранённый" style="width:100%">
+            <div class="foot" id="claudeKeyState"></div>
+            <div class="foot">API оплачивается отдельно от подписки. Web search и токены источников могут увеличить счёт.</div>
+          </div>
+          <div class="row" style="margin-top:12px">
+            <button type="button" id="testClaudeConnection" class="ghost">Проверить подключение</button>
+            <button type="button" id="saveClaudeConnection">Сохранить</button>
+            <button type="button" id="removeClaudeKey" class="ghost">Удалить сохранённый API key</button>
+          </div>
+          <div class="foot" id="claudeConnectionStatus" role="status"></div>
+          <div class="foot">Модель сохраняется. Изменение действует со следующего запуска и общее для этой установки Quorum.</div>
         </div>
-        <div class="foot" id="grokConnectionStatus" role="status"></div>
-        <div class="foot">Модель сохраняется. Изменение действует со следующего запуска и общее для этой установки Quorum.</div>
-      </div>
-    </details>
-    <details class="pipeline-models" id="connectionSettings">
-      <summary style="cursor:pointer">Подключение Claude: подписка / API</summary>
-      <div style="margin-top:12px">
-        <label for="claudeAuth">Способ подключения</label>
-        <select id="claudeAuth">
-          <option value="cli">Подписка Claude · Claude Code CLI</option>
-          <option value="api">Anthropic API · оплата по токенам</option>
-        </select>
-        <div id="claudeKeyBox" style="margin-top:10px" hidden>
-          <label for="claudeApiKey">Anthropic API key</label>
-          <input id="claudeApiKey" type="password" autocomplete="new-password" placeholder="Введите ключ; оставьте пустым, чтобы использовать сохранённый" style="width:100%">
-          <div class="foot" id="claudeKeyState"></div>
-          <div class="foot">API оплачивается отдельно от подписки. Web search и токены источников могут увеличить счёт.</div>
+      </details>
+      <details class="pipeline-models conn" id="gptConnectionSettings">
+        <summary style="cursor:pointer">Подключение GPT / Codex: подписка / API</summary>
+        <div style="margin-top:12px">
+          <label for="gptAuth">Способ подключения</label>
+          <select id="gptAuth">
+            <option value="cli">Подписка ChatGPT · Codex CLI</option>
+            <option value="api">OpenAI API · оплата по токенам</option>
+          </select>
+          <div id="gptKeyBox" style="margin-top:10px" hidden>
+            <label for="gptApiKey">OpenAI API key</label>
+            <input id="gptApiKey" type="password" autocomplete="new-password" placeholder="Введите ключ; оставьте пустым, чтобы использовать сохранённый" style="width:100%">
+            <div class="foot" id="gptKeyState"></div>
+            <div class="foot">API оплачивается отдельно от подписки ChatGPT. Веб-поиск может увеличить счёт.</div>
+          </div>
+          <div class="row" style="margin-top:12px">
+            <button type="button" id="testGptConnection" class="ghost">Проверить подключение</button>
+            <button type="button" id="saveGptConnection">Сохранить</button>
+            <button type="button" id="removeGptKey" class="ghost">Удалить сохранённый API key</button>
+          </div>
+          <div class="foot" id="gptConnectionStatus" role="status"></div>
+          <div class="foot">Модель сохраняется. Изменение действует со следующего запуска и общее для этой установки Quorum.</div>
         </div>
-        <div class="row" style="margin-top:12px">
-          <button type="button" id="testClaudeConnection" class="ghost">Проверить подключение</button>
-          <button type="button" id="saveClaudeConnection">Сохранить</button>
-          <button type="button" id="removeClaudeKey" class="ghost">Удалить сохранённый API key</button>
-        </div>
-        <div class="foot" id="claudeConnectionStatus" role="status"></div>
-        <div class="foot">Модель сохраняется. Изменение действует со следующего запуска и общее для этой установки Quorum.</div>
-      </div>
-    </details>
-    <details class="pipeline-models" id="gptConnectionSettings">
-      <summary style="cursor:pointer">Подключение GPT / Codex: подписка / API</summary>
-      <div style="margin-top:12px">
-        <label for="gptAuth">Способ подключения</label>
-        <select id="gptAuth">
-          <option value="cli">Подписка ChatGPT · Codex CLI</option>
-          <option value="api">OpenAI API · оплата по токенам</option>
-        </select>
-        <div id="gptKeyBox" style="margin-top:10px" hidden>
-          <label for="gptApiKey">OpenAI API key</label>
-          <input id="gptApiKey" type="password" autocomplete="new-password" placeholder="Введите ключ; оставьте пустым, чтобы использовать сохранённый" style="width:100%">
-          <div class="foot" id="gptKeyState"></div>
-          <div class="foot">API оплачивается отдельно от подписки ChatGPT. Веб-поиск может увеличить счёт.</div>
-        </div>
-        <div class="row" style="margin-top:12px">
-          <button type="button" id="testGptConnection" class="ghost">Проверить подключение</button>
-          <button type="button" id="saveGptConnection">Сохранить</button>
-          <button type="button" id="removeGptKey" class="ghost">Удалить сохранённый API key</button>
-        </div>
-        <div class="foot" id="gptConnectionStatus" role="status"></div>
-        <div class="foot">Модель сохраняется. Изменение действует со следующего запуска и общее для этой установки Quorum.</div>
-      </div>
+      </details>
     </details>
     <label>1. Что нужно подготовить?</label>
     <textarea id="pipeQ" placeholder="Например: подготовь проверенный разбор новости…"></textarea>
@@ -1185,7 +1189,6 @@ async function loadPipelineModels(){
       .sort((a,b)=>order.indexOf(a.provider)-order.indexOf(b.provider));
     // One line in pipeline order; details (plan, login, list price) on demand.
     // Problems stay visible in the collapsed line.
-    const wasOpen=box.querySelector('details')?.open;
     const short=needed.map(m=>{
       const name=m.provider==='xai'?'Grok':m.provider==='anthropic'?'Claude':'GPT';
       const label=m.pricing ? m.pricing.label : name+' '+m.model;
@@ -1194,10 +1197,10 @@ async function loadPipelineModels(){
       const warn=(m.auth==='api' && !m.has_api_key) || (m.auth==='cli' && a.status!=='signed_in');
       return `<strong>${esc(label)}</strong> <span>(${how}${warn?' ⚠':''})</span>`;
     }).join(' → ');
-    box.innerHTML=`<details${wasOpen?' open':''}><summary style="cursor:pointer">${short}</summary>`+
-      needed.map(fmtModel).join('')+
-      '<div class="foot">Статус аккаунтов проверяется через CLI раз в минуту. Regular API Price — справочная цена API.</div></details>';
-  }catch(e){ box.textContent='Не удалось загрузить конфигурацию моделей.'; }
+    document.getElementById('modelsSummary').innerHTML=short;
+    box.innerHTML=needed.map(fmtModel).join('')+
+      '<div class="foot" style="margin-bottom:10px">Статус аккаунтов проверяется через CLI раз в минуту. Regular API Price — справочная цена API.</div>';
+  }catch(e){ document.getElementById('modelsSummary').textContent='⚠ Не удалось загрузить конфигурацию моделей.'; }
 }
 async function changeClaudeConnection(testOnly=false,remove=false){
   return changeConnection('claude',testOnly,remove);
