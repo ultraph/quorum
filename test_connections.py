@@ -134,6 +134,10 @@ class ConnectionTests(unittest.TestCase):
             payload, headers = http.call_args.args[1], http.call_args.args[2]
         self.assertEqual([t["type"] for t in payload["tools"]], ["web_search_20250305", "web_fetch_20250910"])
         self.assertNotIn("fallbacks", payload)  # Haiku 5.5 has no server-side fallback
+        self.assertEqual(payload["cache_control"], {"type": "ephemeral"})
+        with patch.object(q, "_http_json", return_value=big) as http:
+            q._api_anthropic(m, "question", False)
+        self.assertNotIn("cache_control", http.call_args.args[1])  # one-shot: no write premium
         self.assertNotIn("anthropic-beta", headers)
         # Prompt above 100K tokens bills the whole request at the higher tier.
         self.assertAlmostEqual(q.estimated_api_cost(m), (120_000 * 0.50 + 1000 * 2.50) / 1_000_000)

@@ -332,10 +332,14 @@ def _api_anthropic(m: Model, prompt: str, web_tools: bool = False) -> str:
         raise RuntimeError("no API key (set api_key, e.g. env:ANTHROPIC_API_KEY)")
     haiku = "haiku" in m.model
     # Current Claude models always think and thinking shares max_tokens, so keep
-    # headroom. Top-level cache_control caches the growing conversation, so a
-    # pause_turn continuation re-reads already fetched pages at cache price.
-    payload = {"model": m.model, "max_tokens": 16000, "cache_control": {"type": "ephemeral"},
+    # headroom.
+    payload = {"model": m.model, "max_tokens": 16000,
                "messages": [{"role": "user", "content": prompt}]}
+    if web_tools:
+        # Tool loops re-read the growing conversation (every fetched page) on
+        # each step, so cache it. A one-shot prompt is never read back: caching
+        # it would only add the 1.25x write premium (measured 18.10.2026).
+        payload["cache_control"] = {"type": "ephemeral"}
     headers = {"x-api-key": m.api_key, "anthropic-version": "2023-06-01",
                "content-type": "application/json"}
     if not haiku:
