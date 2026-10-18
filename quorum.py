@@ -111,6 +111,7 @@ class Model:
     tokens_out: int = 0      # completion tokens
     tokens_est: bool = False # True when counts are a char-based estimate (CLI)
     cost_usd: float | None = None  # exact billed cost when the provider reports it (xAI)
+    searches: dict = field(default_factory=dict)  # server-side tool usage counts (xAI)
 
 
 @dataclass
@@ -380,6 +381,7 @@ def _responses_call(m: Model, url: str, payload: dict, title: str) -> str:
     # xAI bills in 1e-10 USD ticks, including cache discounts and search calls.
     if "cost_in_usd_ticks" in usage:
         m.cost_usd = int(usage["cost_in_usd_ticks"]) / 1e10
+    m.searches = {k: v for k, v in (usage.get("server_side_tool_usage_details") or {}).items() if v}
     if out.get("status") != "completed":
         raise RuntimeError(f"{title} API response did not complete")
     answer = "\n".join(block.get("text", "")

@@ -121,7 +121,10 @@ class ConnectionTests(unittest.TestCase):
     def test_xai_responses_use_web_and_x_search(self):
         model = q.Model("grok", "xai", "grok-4.7", api_key="test-secret")
         response = {"status": "completed", "usage": {"input_tokens": 300, "output_tokens": 90,
-                                                      "cost_in_usd_ticks": 2894140000},
+                                                      "cost_in_usd_ticks": 2894140000,
+                                                      "server_side_tool_usage_details": {
+                                                          "web_search_calls": 5, "x_search_calls": 8,
+                                                          "mcp_calls": 0}},
                     "output": [{"type": "message", "content": [
                         {"type": "output_text", "text": "research"}]}]}
         with patch.object(q, "_http_json", return_value=response) as http:
@@ -132,6 +135,7 @@ class ConnectionTests(unittest.TestCase):
             self.assertEqual(http.call_args.args[1]["max_turns"], q.XAI_MAX_TURNS)
         # Provider-reported cost (incl. searches) wins over the token estimate.
         self.assertAlmostEqual(q.estimated_api_cost(model), 0.289414)
+        self.assertEqual(model.searches, {"web_search_calls": 5, "x_search_calls": 8})
 
     def test_grok_key_check_and_manual_mode(self):
         class Request:
