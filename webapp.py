@@ -1180,9 +1180,23 @@ async function loadPipelineModels(){
       document.getElementById('claudeKeyState').textContent=claude.has_api_key?'API key сохранён на сервере.':'Сохранённого API key нет.';
       document.getElementById('removeClaudeKey').disabled=!claude.has_api_key;
     }
-    const needed=data.panel.filter(m=>(m.enabled || m.provider==='xai') && ['xai','anthropic','openai'].includes(m.provider));
-    box.innerHTML='<strong>Модели и способ подключения:</strong>'+needed.map(fmtModel).join('')+
-      '<div class="foot">Статус аккаунтов проверяется через CLI раз в минуту. Regular API Price — справочная цена API.</div>';
+    const order=['xai','anthropic','openai'];
+    const needed=data.panel.filter(m=>(m.enabled || m.provider==='xai') && order.includes(m.provider))
+      .sort((a,b)=>order.indexOf(a.provider)-order.indexOf(b.provider));
+    // One line in pipeline order; details (plan, login, list price) on demand.
+    // Problems stay visible in the collapsed line.
+    const wasOpen=box.querySelector('details')?.open;
+    const short=needed.map(m=>{
+      const name=m.provider==='xai'?'Grok':m.provider==='anthropic'?'Claude':'GPT';
+      const label=m.pricing ? m.pricing.label : name+' '+m.model;
+      const a=m.account||{};
+      const how=m.auth==='api'?'API':m.auth==='manual'?'вручную':'подписка';
+      const warn=(m.auth==='api' && !m.has_api_key) || (m.auth==='cli' && a.status!=='signed_in');
+      return `<strong>${esc(label)}</strong> <span>(${how}${warn?' ⚠':''})</span>`;
+    }).join(' → ');
+    box.innerHTML=`<details${wasOpen?' open':''}><summary style="cursor:pointer">${short}</summary>`+
+      needed.map(fmtModel).join('')+
+      '<div class="foot">Статус аккаунтов проверяется через CLI раз в минуту. Regular API Price — справочная цена API.</div></details>';
   }catch(e){ box.textContent='Не удалось загрузить конфигурацию моделей.'; }
 }
 async function changeClaudeConnection(testOnly=false,remove=false){
