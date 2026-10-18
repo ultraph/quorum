@@ -111,7 +111,9 @@ class Model:
     tokens_out: int = 0      # completion tokens
     tokens_est: bool = False # True when counts are a char-based estimate (CLI)
     cost_usd: float | None = None  # exact billed cost when the provider reports it (xAI)
-    searches: dict = field(default_factory=dict)  # server-side tool usage counts (xAI)
+    # Billing details beyond plain in/out tokens: server-side tool calls and
+    # cache tokens, so a run can be reconciled against the provider console.
+    searches: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -316,6 +318,7 @@ def _api_anthropic(m: Model, prompt: str, web_tools: bool = False) -> str:
         ]
     m.tokens_in = m.tokens_out = 0
     m.tokens_est = False
+    m.searches = {}
     deadline = time.monotonic() + 420
     while True:
         remaining = deadline - time.monotonic()
@@ -329,6 +332,14 @@ def _api_anthropic(m: Model, prompt: str, web_tools: bool = False) -> str:
         u = out.get("usage") or {}
         m.tokens_in += int(u.get("input_tokens", 0))
         m.tokens_out += int(u.get("output_tokens", 0))
+        # Cache tokens and server tool calls are billed separately from
+        # input_tokens; every pause_turn continuation is its own request.
+        extra = {"cache_read_tokens": u.get("cache_read_input_tokens"),
+                 "cache_write_tokens": u.get("cache_creation_input_tokens"),
+                 **(u.get("server_tool_use") or {})}
+        for key, value in extra.items():
+            if isinstance(value, int) and value:
+                m.searches[key] = m.searches.get(key, 0) + value
         if out.get("stop_reason") != "pause_turn":
             break
         payload["messages"].append({"role": "assistant", "content": out["content"]})
@@ -382,6 +393,14 @@ def _responses_call(m: Model, url: str, payload: dict, title: str) -> str:
     if "cost_in_usd_ticks" in usage:
         m.cost_usd = int(usage["cost_in_usd_ticks"]) / 1e10
     m.searches = {k: v for k, v in (usage.get("server_side_tool_usage_details") or {}).items() if v}
+    if title == "OpenAI":  # xAI reports its tool calls in the usage block above
+        calls = sum(item.get("type") == "web_search_call" for item in out.get("output", []))
+        if calls:
+            m.searches["web_search_calls"] = calls
+    for key, value in (("cached_tokens", (usage.get("input_tokens_details") or {}).get("cached_tokens")),
+                       ("reasoning_tokens", (usage.get("output_tokens_details") or {}).get("reasoning_tokens"))):
+        if value:
+            m.searches[key] = value
     if out.get("status") != "completed":
         raise RuntimeError(f"{title} API response did not complete")
     answer = "\n".join(block.get("text", "")

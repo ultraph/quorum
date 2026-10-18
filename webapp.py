@@ -913,7 +913,8 @@ function fmtTok(o){
 }
 function fmtSearches(s){
   if(!s) return '';
-  const parts=[['web_search_calls','веб-поисков'],['x_search_calls','поисков X'],['x_posts_fetched','постов X'],['x_users_fetched','профилей X']]
+  const parts=[['web_search_calls','веб-поисков'],['web_search_requests','веб-поисков'],['web_fetch_requests','открытых страниц'],
+    ['x_search_calls','поисков X'],['x_posts_fetched','постов X'],['x_users_fetched','профилей X']]
     .filter(([k])=>s[k]).map(([k,l])=>s[k]+' '+l);
   return parts.length ? ' · '+parts.join(', ') : '';
 }

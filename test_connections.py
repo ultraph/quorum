@@ -37,14 +37,16 @@ class ConnectionTests(unittest.TestCase):
 
     def test_openai_responses_tools_and_usage(self):
         model = q.Model("gpt", "openai", "gpt-6.1-sol", api_key="test-secret")
-        response = {"status": "completed", "usage": {"input_tokens": 120, "output_tokens": 25},
-                    "output": [{"type": "reasoning"}, {"type": "message", "content": [
+        response = {"status": "completed", "usage": {"input_tokens": 120, "output_tokens": 25,
+                                                      "input_tokens_details": {"cached_tokens": 64}},
+                    "output": [{"type": "reasoning"}, {"type": "web_search_call"}, {"type": "message", "content": [
                         {"type": "output_text", "text": "review"}]}]}
         with patch.object(q, "_http_json", return_value=response) as http:
             self.assertEqual(q.call_model(model, "question", True), "review")
             self.assertEqual(http.call_args.args[0], "https://api.openai.com/v1/responses")
             self.assertEqual(http.call_args.args[1]["tools"], [{"type": "web_search"}])
             self.assertEqual((model.tokens_in, model.tokens_out, model.tokens_est), (120, 25, False))
+            self.assertEqual(model.searches, {"web_search_calls": 1, "cached_tokens": 64})
 
     def test_openai_key_check_does_not_save_on_test(self):
         class Request:
@@ -110,12 +112,14 @@ class ConnectionTests(unittest.TestCase):
             {"stop_reason": "pause_turn", "content": [{"type": "text", "text": "working"}],
              "usage": {"input_tokens": 100, "output_tokens": 20}},
             {"stop_reason": "end_turn", "content": [{"type": "text", "text": "answer"}],
-             "usage": {"input_tokens": 150, "output_tokens": 30}},
+             "usage": {"input_tokens": 150, "output_tokens": 30, "cache_read_input_tokens": 40,
+                       "server_tool_use": {"web_search_requests": 3}}},
         ]
         with patch.object(q, "_http_json", side_effect=responses) as http:
             self.assertEqual(q._api_anthropic(m, "question", True), "answer")
             self.assertEqual([t["name"] for t in http.call_args.args[1]["tools"]], ["web_search", "web_fetch"])
             self.assertEqual((m.tokens_in, m.tokens_out, m.tokens_est), (250, 50, False))
+            self.assertEqual(m.searches, {"web_search_requests": 3, "cache_read_tokens": 40})
 
     def test_api_refusal_is_reported(self):
         m = q.Model("claude", "anthropic", "claude-opus-5-5", api_key="test-secret")
