@@ -210,6 +210,52 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(asyncio.run(replay()), events)
         self.assertEqual(os.stat(runs.runs_dir() / f"{stored[0]['id']}.json").st_mode & 0o777, 0o600)
 
+    def test_revision_reuses_research_without_grok(self):
+        parent = runs.new("Что нового?", "", "")
+        parent.update(status="done", ok=True, events=[
+            {"type": "stage", "stage": "research", "provider": "xai", "model": "grok-4.7",
+             "answer": "grok packet", "error": "", "cost_usd": 0.25},
+            {"type": "stage", "stage": "final", "provider": "anthropic", "model": "claude-opus-5-5",
+             "answer": "old final", "error": ""},
+            {"type": "done", "ok": True}])
+        runs.save(parent)
+        claude = q.Model("claude", "anthropic", "claude-opus-5-5", auth="cli")
+        gpt = q.Model("gpt", "openai", "gpt-6.1-sol", auth="cli")
+        grok = q.Model("grok", "xai", "grok-4.7", api_key="test-secret")
+        prompts = []
+
+        def fake_run(m, prompt, web_tools=False):
+            prompts.append((m.provider, prompt))
+            m.answer = f"{m.provider} answer"
+            return m
+
+        class Request:
+            def __init__(self, text):
+                self.text = text
+
+            async def json(self):
+                return {"revision": self.text}
+
+        async def collect():
+            response = await webapp.api_revise(parent["id"], Request("сократи"))
+            return [json.loads(chunk[6:]) async for chunk in response.body_iterator][1:]
+
+        with patch.object(q, "load_config", return_value=SimpleNamespace(panel=[claude, gpt, grok])), \
+             patch.object(q, "run_model", side_effect=fake_run), \
+             patch.object(webapp, "blockchain_evidence", return_value="none"):
+            events = asyncio.run(collect())
+            rejected = asyncio.run(webapp.api_revise(parent["id"], Request(" ")))
+        self.assertEqual(rejected.status_code, 400)
+        self.assertEqual([p for p, _ in prompts], ["anthropic", "openai", "anthropic"])  # no xai call
+        self.assertIn("grok packet", prompts[0][1])
+        self.assertIn("сократи", prompts[0][1])
+        self.assertIn("old final", prompts[0][1])
+        self.assertEqual(events[0]["type"], "revision")
+        self.assertIsNone(events[1]["cost_usd"])  # reused research is not billed again
+        self.assertTrue(events[-1]["ok"])
+        child = [r for r in runs.recent() if r["parent"]]
+        self.assertEqual(child[0]["parent"], parent["id"])
+
     def test_run_interrupted_by_restart_is_reported(self):
         run = runs.new("вопрос", "", "")
         runs.save(run)  # status "running", but no live task owns it

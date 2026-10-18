@@ -54,5 +54,5 @@ def recent(limit: int = 30) -> list[dict]:
         except (OSError, ValueError):
             continue
         out.append({"id": run["id"], "created": run["created"], "question": run["question"][:120],
-                    "status": run["status"], "ok": run["ok"]})
+                    "status": run["status"], "ok": run["ok"], "parent": run.get("parent")})
     return out

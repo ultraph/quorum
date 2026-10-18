@@ -620,8 +620,11 @@ TASKS: set[asyncio.Task] = set()
 
 async def _execute(run: dict) -> None:
     try:
-        async for event in _pipeline_events(run["question"], run["research"],
-                                            run["revision"] or "(none)"):
+        # A revision reuses the parent's research and sees its final answer;
+        # the stored "revision" stays the user's own short remark.
+        async for event in _pipeline_events(run["question"],
+                                            run.get("reused_research") or run["research"],
+                                            run.get("revision_prompt") or run["revision"] or "(none)"):
             run["events"].append(event)
             if event["type"] == "done":
                 run["ok"] = event.get("ok")
@@ -666,12 +669,40 @@ async def api_pipeline(req: Request) -> StreamingResponse:
         return StreamingResponse(rejected(), media_type="text/event-stream")
     run = runs.new((body.get("question") or "").strip(), (body.get("research") or "").strip(),
                    (body.get("revision") or "").strip())
+    return await _start(run)
+
+
+async def _start(run: dict) -> StreamingResponse:
     LIVE[run["id"]] = run
     await asyncio.to_thread(runs.save, run)
     task = asyncio.get_running_loop().create_task(_execute(run))
     TASKS.add(task)  # the loop keeps only weak references to tasks
     task.add_done_callback(TASKS.discard)
     return StreamingResponse(_tail(run), media_type="text/event-stream")
+
+
+@app.post("/api/runs/{run_id}/revise")
+async def api_revise(run_id: str, req: Request):
+    """Redo Claude → GPT → Claude with the user's remarks, reusing the parent's
+    research so a revision never pays for another Grok API search."""
+    remarks = ((await req.json()).get("revision") or "").strip()
+    parent = _stored_run(run_id)
+    if parent is None:
+        return JSONResponse({"error": "Прогон не найден."}, status_code=404)
+    if not remarks:
+        return JSONResponse({"error": "Напиши, что исправить."}, status_code=400)
+    stages = {e["stage"]: e for e in parent["events"] if e.get("type") == "stage" and not e.get("error")}
+    research = parent["research"] or stages.get("research", {}).get("answer", "")
+    final = stages.get("final", {}).get("answer", "")
+    if not research or not final:
+        return JSONResponse({"error": "У этого прогона нет готового исследования и финала — запусти его заново."}, status_code=400)
+    run = runs.new(parent["question"], parent["research"], remarks)
+    run.update(parent=parent["id"], reused_research=research,
+               revision_prompt=f"{remarks}\n\n=== PREVIOUS FINAL ANSWER (the remarks refer to it) ===\n{final}")
+    run["events"].append({"type": "revision", "text": remarks, "parent_created": parent["created"]})
+    if "research" in stages:
+        run["events"].append({**stages["research"], "reused_from": parent["created"], "cost_usd": None})
+    return await _start(run)
 
 
 @app.get("/api/runs")
@@ -981,8 +1012,6 @@ INDEX_HTML = r"""<!doctype html>
     <button type="button" id="copyGrokPrompt" class="ghost">📋 Copy prompt for Grok</button>
     <textarea id="grokNotes" style="min-height:180px" placeholder="Вставь сюда результат поиска Grok. Сохраняй ссылки, даты и цитаты — они пойдут автору и фактчекеру."></textarea>
     </div>
-    <label style="margin-top:14px">3. Что исправить в следующей версии? <span style="font-weight:400">— необязательно</span></label>
-    <textarea id="revisionNotes" style="min-height:70px" placeholder="Например: сократи до 500 слов, проверь цифру из второго источника, добавь контекст…"></textarea>
     <div class="row" style="margin-top:14px">
       <span class="foot">Grok ищет → Claude проверяет источники → GPT/Codex делает ревью → Claude готовит финал</span>
       <div style="margin-left:auto"><button id="runPipeline">Run pipeline</button></div>
@@ -1201,7 +1230,6 @@ async function copyGrokPrompt(){
 function pipelineInputs(run){
   document.getElementById('pipeQ').value=run.question||'';
   document.getElementById('grokNotes').value=run.research||'';
-  document.getElementById('revisionNotes').value=run.revision||'';
 }
 function rememberRun(id){
   try{ if(id) localStorage.setItem('lastRun',id); else localStorage.removeItem('lastRun'); }catch(e){}
@@ -1211,7 +1239,7 @@ async function loadRunHistory(selected){
   try{
     const data=await (await fetch('/api/runs')).json();
     sel.innerHTML='<option value="">— новый прогон —</option>'+data.runs.map(r=>{
-      const mark=r.status==='running'?'⏳ ':r.ok?'✓ ':'✗ ';
+      const mark=(r.status==='running'?'⏳ ':r.ok?'✓ ':'✗ ')+(r.parent?'✎ ':'');
       return `<option value="${esc(r.id)}">${mark}${esc(r.created)} · ${esc(r.question.slice(0,70))}</option>`;
     }).join('');
     sel.value=selected||'';
@@ -1222,7 +1250,7 @@ async function followRun(resp){
   const out=document.getElementById('pipelineOut');
   const status=document.getElementById('pipelineStatus');
   const btn=document.getElementById('runPipeline');
-  const cards={};
+  const cards={}; let runId='';
   out.innerHTML=''; status.className='foot';
   btn.disabled=true;
   try{
@@ -1236,7 +1264,9 @@ async function followRun(resp){
         if(!line.startsWith('data: ')) continue;
         const o=JSON.parse(line.slice(6));
         if(o.type==='run'){
-          rememberRun(o.id); loadRunHistory(o.id);
+          runId=o.id; rememberRun(o.id); loadRunHistory(o.id);
+        } else if(o.type==='revision'){
+          out.appendChild(card(`<div class="foot">✎ Доработка прогона от ${esc(o.parent_created)}</div><div>${esc(o.text)}</div>`));
         } else if(o.type==='stage_start'){
           const d=card(`<h3>${esc(PIPE_LABEL[o.stage]||o.stage)}</h3><pre class="spin">${esc(o.name)} is working<span class="dots"></span></pre>`,o.stage==='final'?'judge':'');
           cards[o.stage]=d; out.appendChild(d);
@@ -1244,7 +1274,8 @@ async function followRun(resp){
           const d=cards[o.stage] || card('',o.stage==='final'?'judge':'');
           if(!cards[o.stage]){ cards[o.stage]=d; out.appendChild(d); }
           const cost=fmtCost(o.cost_usd);
-          const meta=`${esc(o.provider)}/${esc(o.model)} · ${o.seconds}s${fmtTok(o)}${cost?' · '+cost:''}${fmtSearches(o.searches)}`;
+          const meta=o.reused_from ? `${esc(o.provider)}/${esc(o.model)} · взято из прогона от ${esc(o.reused_from)}, повторно не оплачивалось`
+            : `${esc(o.provider)}/${esc(o.model)} · ${o.seconds}s${fmtTok(o)}${cost?' · '+cost:''}${fmtSearches(o.searches)}`;
           const title=`${esc(PIPE_LABEL[o.stage]||o.stage)} <span class="meta">${meta}</span>`;
           const body=o.error ? `<pre class="err">ERROR: ${esc(o.error)}</pre>` : `<div class="md">${mdToHtml(o.answer)}</div>`;
           if(!o.error && o.stage!=='final'){
@@ -1254,11 +1285,7 @@ async function followRun(resp){
           }
           if(!o.error){
             addCopyActions(d,o.answer,o.stage);
-            if(o.stage==='final'){
-              const hint=document.createElement('div'); hint.className='foot';
-              hint.textContent='Нужна доработка? Напиши замечания в поле 3 выше и запусти pipeline снова.';
-              d.appendChild(hint);
-            }
+            if(o.stage==='final') d.appendChild(reviseBox(()=>runId));
           }
         } else if(o.type==='error'){
           status.innerHTML=`<span class="banner err">✗ ${esc(o.message)}</span>`;
@@ -1279,6 +1306,24 @@ async function followRun(resp){
   }catch(e){ status.innerHTML=`<span class="banner err">✗ ${esc(String(e.message||e))}</span>`; }
   finally{ btn.disabled=false; loadRunHistory(document.getElementById('runHistory').value); }
 }
+// Revision reuses the stored research: only Claude → GPT → Claude run again.
+function reviseBox(getRunId){
+  const box=document.createElement('div'); box.style.marginTop='14px';
+  box.innerHTML=`<label>Что исправить? <span style="font-weight:400">— Grok заново не запускается, исследование берётся из этого прогона</span></label>`+
+    `<textarea class="revise-text" style="min-height:60px" placeholder="Например: сократи, проверь цифру из второго источника, добавь контекст…"></textarea>`+
+    `<div class="row" style="margin-top:8px"><button type="button" class="revise-btn">Доработать</button><span class="foot revise-status"></span></div>`;
+  box.querySelector('.revise-btn').addEventListener('click',async()=>{
+    const text=box.querySelector('.revise-text').value.trim(), st=box.querySelector('.revise-status');
+    if(!text){ st.textContent='Напиши, что исправить.'; box.querySelector('.revise-text').focus(); return; }
+    const resp=await fetch('/api/runs/'+encodeURIComponent(getRunId())+'/revise',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({revision:text})});
+    if(!resp.ok){ st.textContent=(await resp.json()).error||'Не удалось запустить доработку.'; return; }
+    window.scrollTo({top:document.getElementById('pipelineOut').offsetTop-80,behavior:'smooth'});
+    document.getElementById('pipelineStatus').textContent='Дорабатываю: Claude → GPT/Codex → Claude…';
+    await followRun(resp);
+  });
+  return box;
+}
 async function openRun(id){
   const status=document.getElementById('pipelineStatus');
   const r=await fetch('/api/runs/'+encodeURIComponent(id));
@@ -1291,13 +1336,12 @@ async function openRun(id){
 async function runPipeline(){
   const question=document.getElementById('pipeQ').value.trim();
   const research=GROK_MODE==='api' ? '' : document.getElementById('grokNotes').value.trim();
-  const revision=document.getElementById('revisionNotes').value.trim();
   const status=document.getElementById('pipelineStatus');
   status.className='foot';
   if(!question){ status.textContent='Опиши, что нужно подготовить.'; return; }
   if(GROK_MODE!=='api' && !research){ status.textContent='Сначала вставь исследование из Grok со ссылками.'; return; }
   const resp=fetch('/api/pipeline',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({question:question,research:research,revision:revision})});
+    body:JSON.stringify({question:question,research:research})});
   status.textContent=GROK_MODE==='api' ? 'Запускаю Grok → Claude → GPT/Codex → Claude…' : 'Запускаю Claude → GPT/Codex → Claude…';
   try{ await followRun(await resp); }
   catch(e){ status.innerHTML=`<span class="banner err">✗ ${esc(String(e.message||e))}</span>`; }
@@ -1527,7 +1571,6 @@ document.getElementById('home').addEventListener('click', function(){
   document.getElementById('runHistory').value = '';
   document.getElementById('pipeQ').value = '';
   document.getElementById('grokNotes').value = '';
-  document.getElementById('revisionNotes').value = '';
   document.getElementById('pipelineOut').innerHTML = '';
   document.getElementById('pipelineStatus').textContent = '';
   document.getElementById('runPipeline').disabled = false;
