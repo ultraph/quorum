@@ -889,6 +889,134 @@ async def api_revise(run_id: str, req: Request):
     return await _start(run)
 
 
+PIPELINE_CHAT = """\
+You are {name}. A research pipeline (Grok research → Claude analysis →
+GPT/Codex review → Claude final) has finished on the topic below. The user now
+continues the conversation with you alone. Answer the user's latest message.
+
+Ground every answer in the material below first. Use web tools only for what
+the material does not cover or when the user asks for something newer, and
+then cite the URL. If the material and a fresh source disagree, say so and
+prefer the primary source. Grok owns X research: do not open or search X
+posts; treat the X posts in the notes as leads, not proof. Do not repeat the
+whole final answer; answer the question asked, as briefly as it allows.
+Write every EVM address in full (`0x` + 40 hexadecimal characters).
+Earlier replies in the conversation may come from another model; check them as
+critically as the rest of the material.
+Write in the user's language. Today is {today}.
+
+=== ORIGINAL REQUEST ===
+{question}
+
+=== GROK RESEARCH NOTES ===
+{research}
+
+=== SOURCE EXTRACTS ===
+{extracts}
+
+=== INDEPENDENT ON-CHAIN EVIDENCE ===
+{chain_evidence}
+
+=== CLAUDE FULL ANALYSIS ===
+{draft}
+
+=== GPT/CODEX REVIEW ===
+{review}
+
+=== FINAL ANSWER SHOWN TO THE USER ===
+{final}
+
+=== CONVERSATION SO FAR ===
+{history}
+"""
+
+CHAT_MODELS = {"claude": "anthropic", "codex": "openai"}
+# Runs with a chat reply in progress, so polling sees the live object.
+CHATTING: dict[str, dict] = {}
+
+
+def _chat_state(run: dict) -> dict:
+    pending = run.get("chat_pending") and run["id"] in CHATTING
+    if run.get("chat_pending") and not pending:
+        # The service restarted mid-reply; the task that owned it is gone.
+        return {"chat": run.get("chat", []) + [{"role": "error", "text": "Ответ прерван перезапуском сервиса."}],
+                "chat_pending": False}
+    return {"chat": run.get("chat", []), "chat_pending": bool(pending)}
+
+
+async def _chat_reply(run: dict, m: q.Model, key: str) -> None:
+    try:
+        stages = {e["stage"]: e.get("answer", "") for e in run["events"]
+                  if e.get("type") == "stage" and not e.get("error")}
+        research = stages.get("research") or run["research"]
+        question = _with_material(run["question"], run.get("attachments", []))
+        if "chain_evidence" not in run:  # not stored by the pipeline; fetched once per run
+            run["chain_evidence"] = await asyncio.to_thread(blockchain_evidence, f"{question}\n{research}")
+        history = "\n\n".join(f"--- {'USER' if c['role'] == 'user' else c.get('name', 'ASSISTANT')} ---\n{c['text']}"
+                              for c in run["chat"] if c["role"] in ("user", "assistant"))
+        prompt = PIPELINE_CHAT.format(
+            name=m.name, today=time.strftime("%d.%m.%Y"), question=question, research=research,
+            extracts=stages.get("reader") or "(none)", chain_evidence=run["chain_evidence"],
+            draft=stages.get("draft", ""), review=stages.get("review", ""), final=stages.get("final", ""),
+            history=history)
+        result = await asyncio.to_thread(q.run_model, m, prompt, True)
+        event = _stage_event("chat", result)
+        run["chat"].append({"role": "error" if result.error else "assistant", "model": key,
+                            "name": result.name, "text": result.error or result.answer,
+                            "time": time.strftime("%d.%m.%Y %H:%M"), "seconds": event["seconds"],
+                            "provider": result.provider, "served_model": result.served_model or result.model,
+                            "tokens_in": result.tokens_in, "tokens_out": result.tokens_out,
+                            "tokens_est": result.tokens_est, "cost_usd": event["cost_usd"],
+                            "searches": result.searches})
+    except Exception as exc:  # noqa: BLE001 — record, never lose the conversation
+        run["chat"].append({"role": "error", "text": f"Ответ не получен: {exc}"[:400]})
+    finally:
+        run["chat_pending"] = False
+        await asyncio.to_thread(runs.save, run)
+        CHATTING.pop(run["id"], None)
+
+
+@app.get("/api/runs/{run_id}/chat")
+async def api_chat_state(run_id: str) -> JSONResponse:
+    run = CHATTING.get(run_id) or _stored_run(run_id)
+    if run is None:
+        return JSONResponse({"error": "Прогон не найден."}, status_code=404)
+    return JSONResponse(_chat_state(run))
+
+
+@app.post("/api/runs/{run_id}/chat")
+async def api_chat(run_id: str, req: Request) -> JSONResponse:
+    """Continue the topic with one model over everything the run collected.
+    Stateless per turn: material + the whole conversation go into each prompt."""
+    body = await req.json()
+    text, key = (body.get("text") or "").strip(), body.get("model")
+    if key not in CHAT_MODELS:
+        return JSONResponse({"error": "Выбери Claude или Codex."}, status_code=400)
+    if not text:
+        return JSONResponse({"error": "Напиши сообщение."}, status_code=400)
+    if run_id in CHATTING:
+        return JSONResponse({"error": "Модель ещё отвечает на предыдущее сообщение."}, status_code=409)
+    run = _stored_run(run_id)
+    if run is None:
+        return JSONResponse({"error": "Прогон не найден."}, status_code=404)
+    if run["status"] == "running" or not any(e.get("stage") == "final" and e.get("type") == "stage"
+                                             and not e.get("error") for e in run["events"]):
+        return JSONResponse({"error": "Беседа доступна после готового финала."}, status_code=400)
+    m = next((m for m in q.load_config().panel if m.enabled and m.provider == CHAT_MODELS[key]), None)
+    if m is None:
+        return JSONResponse({"error": f"{'Claude' if key == 'claude' else 'GPT/Codex'} не включён в конфиге."},
+                            status_code=400)
+    run = runs.load(run_id) or run  # fresh copy from disk, not a LIVE pipeline object
+    run.setdefault("chat", []).append({"role": "user", "text": text, "time": time.strftime("%d.%m.%Y %H:%M")})
+    run["chat_pending"] = True
+    CHATTING[run_id] = run
+    await asyncio.to_thread(runs.save, run)
+    task = asyncio.get_running_loop().create_task(_chat_reply(run, m, key))
+    TASKS.add(task)
+    task.add_done_callback(TASKS.discard)
+    return JSONResponse(_chat_state(run))
+
+
 @app.get("/api/runs")
 async def api_runs() -> JSONResponse:
     items = await asyncio.to_thread(runs.recent)
@@ -962,6 +1090,11 @@ INDEX_HTML = r"""<!doctype html>
   .res pre { white-space:pre-wrap; word-wrap:break-word; margin:0; font:inherit; }
   .judge { border-color:var(--judge); }
   .judge h3 { color:var(--judge); }
+  .chat-box { margin-top:18px; padding-top:14px; border-top:1px solid var(--line); }
+  .chat-msg { margin:10px 0; padding:10px 12px; border-radius:10px; border:1px solid var(--line); background:var(--inbg); }
+  .chat-msg.user { border-color:var(--acc); }
+  .chat-msg.error { border-color:var(--err); color:var(--err); }
+  .chat-msg .who { font-size:12px; color:var(--dim); margin-bottom:4px; }
   .jactions { display:flex; gap:8px; margin-top:14px; padding-top:12px; border-top:1px solid var(--line); }
   details.card .jactions { margin:0 16px; padding:12px 0 16px; }
   .jbtn { font-size:13px; padding:6px 12px; }
@@ -1387,7 +1520,7 @@ async function loadRunHistory(selected){
   try{
     const data=await (await fetch('/api/runs')).json();
     sel.innerHTML='<option value="">— новый прогон —</option>'+data.runs.map(r=>{
-      const mark=(r.status==='running'?'⏳ ':r.ok?'✓ ':'✗ ')+(r.parent?'✎ ':'');
+      const mark=(r.status==='running'?'⏳ ':r.ok?'✓ ':'✗ ')+(r.parent?'✎ ':'')+(r.chat?'💬 ':'');
       return `<option value="${esc(r.id)}">${mark}${esc(r.title.length>80 ? r.title.slice(0,80).trim()+'…' : r.title)} · ${esc(r.created)}</option>`;
     }).join('');
     sel.value=selected||'';
@@ -1434,7 +1567,7 @@ async function followRun(resp){
           }
           if(!o.error){
             addCopyActions(d,o.answer,o.stage);
-            if(o.stage==='final') d.appendChild(reviseBox(()=>runId));
+            if(o.stage==='final'){ d.appendChild(reviseBox(()=>runId)); d.appendChild(chatBox(()=>runId)); }
           }
         } else if(o.type==='error'){
           status.innerHTML=`<span class="banner err">✗ ${esc(o.message)}</span>`;
@@ -1471,6 +1604,66 @@ function reviseBox(getRunId){
     document.getElementById('pipelineStatus').textContent='Дорабатываю: Claude → GPT/Codex → Claude…';
     await followRun(resp);
   });
+  return box;
+}
+// Conversation with one model over everything this run collected.
+const CHAT_NAMES={claude:'Claude',codex:'GPT/Codex'};
+function chatBox(getRunId){
+  const box=document.createElement('div'); box.className='chat-box';
+  box.innerHTML=`<label>💬 Продолжить беседу <span style="font-weight:400">— одна модель отвечает с опорой на весь материал прогона, при нехватке ищет в вебе</span></label>`+
+    `<div class="chat-log"></div>`+
+    `<textarea class="chat-text" style="min-height:60px" placeholder="Например: а что будет, если…, объясни подробнее второй пункт, перепроверь цифру…"></textarea>`+
+    `<div class="row" style="margin-top:8px"><select class="chat-model"><option value="claude">Claude</option><option value="codex">GPT/Codex</option></select>`+
+    `<button type="button" class="chat-btn">Спросить</button><span class="foot chat-status"></span></div>`;
+  const log=box.querySelector('.chat-log'), ta=box.querySelector('.chat-text'), sel=box.querySelector('.chat-model'),
+        btn=box.querySelector('.chat-btn'), st=box.querySelector('.chat-status');
+  let timer=null, shown=-1;
+  function render(state){
+    const msgs=state.chat||[];
+    if(msgs.length!==shown){
+      shown=msgs.length; log.innerHTML='';
+      msgs.forEach((c,i)=>{
+        const d=document.createElement('div'); d.className='chat-msg '+(c.role==='user'?'user':c.role==='error'?'error':'');
+        if(c.role==='user'){
+          d.innerHTML=`<div class="who">Ты · ${esc(c.time||'')}</div><div>${esc(c.text).replace(/\n/g,'<br>')}</div>`;
+        } else if(c.role==='error'){
+          d.innerHTML=`<div class="who">${esc(c.name||'Ошибка')}</div><pre class="err">${esc(c.text)}</pre>`;
+        } else {
+          const cost=fmtCost(c.cost_usd);
+          d.innerHTML=`<div class="who">${esc(CHAT_NAMES[c.model]||c.name)} · ${esc(c.served_model||'')} · ${esc(c.time||'')} · ${c.seconds}s${fmtTok(c)}${cost?' · '+cost:''}${fmtSearches(c.searches)}</div><div class="md">${mdToHtml(c.text)}</div>`;
+          addCopyActions(d,c.text,'chat-'+(i+1));
+          sel.value=c.model||sel.value;
+        }
+        log.appendChild(d);
+      });
+    }
+    btn.disabled=!!state.chat_pending;
+    if(state.chat_pending){
+      st.innerHTML=`<span class="spin">Модель думает<span class="dots"></span></span>`;
+      if(!timer) timer=setInterval(poll,2500);
+    } else {
+      st.textContent=''; if(timer){ clearInterval(timer); timer=null; }
+    }
+  }
+  async function poll(){
+    if(!box.isConnected){ clearInterval(timer); timer=null; return; }
+    try{ const r=await fetch('/api/runs/'+encodeURIComponent(getRunId())+'/chat'); if(r.ok) render(await r.json()); }catch(e){}
+  }
+  async function send(){
+    const text=ta.value.trim();
+    if(!text){ st.textContent='Напиши сообщение.'; ta.focus(); return; }
+    btn.disabled=true;
+    try{
+      const r=await fetch('/api/runs/'+encodeURIComponent(getRunId())+'/chat',{method:'POST',
+        headers:{'Content-Type':'application/json'},body:JSON.stringify({text:text,model:sel.value})});
+      const d=await r.json();
+      if(!r.ok){ st.textContent=d.error||'Не удалось отправить.'; btn.disabled=false; return; }
+      ta.value=''; render(d); loadRunHistory(document.getElementById('runHistory').value);
+    }catch(e){ st.textContent=String(e.message||e); btn.disabled=false; }
+  }
+  btn.addEventListener('click',send);
+  ta.addEventListener('keydown',ev=>{ if(ev.key==='Enter' && (ev.ctrlKey||ev.metaKey)) send(); });
+  setTimeout(poll,0);
   return box;
 }
 async function openRun(id){

@@ -76,5 +76,6 @@ def recent(limit: int = 30) -> list[dict]:
         except (OSError, ValueError):
             continue
         out.append({"id": run["id"], "created": run["created"], "title": title(run["question"], run.get("topic", "")),
-                    "status": run["status"], "ok": run["ok"], "parent": run.get("parent")})
+                    "status": run["status"], "ok": run["ok"], "parent": run.get("parent"),
+                    "chat": sum(1 for c in run.get("chat", []) if c["role"] == "user")})
     return out

@@ -64,7 +64,7 @@ Polygon — 402), другие сети НЕ перебираются: совп�
   оценка API-цены (`api_price_estimate`), CLI-интерфейс и мастер `--setup`.
 - `webapp.py` — FastAPI + весь фронтенд в строке `INDEX_HTML` (HTML/CSS/JS).
   Эндпоинты: `/api/models`, `/api/pipeline` (SSE),
-  `/api/connections/{claude,gpt,grok}`, `/api/grok_prompt`, `/api/runs[/{id}[/stream|/revise]]`. Промпты этапов —
+  `/api/connections/{claude,gpt,grok}`, `/api/grok_prompt`, `/api/runs[/{id}[/stream|/revise|/chat]]`. Промпты этапов —
   `GROK_RESEARCH`, `PIPELINE_*`.
 - `connections.py` — переключение «подписка (CLI) ↔ API-ключ» (у Grok —
   «API ↔ вручную») из веба;
@@ -76,6 +76,13 @@ Polygon — 402), другие сети НЕ перебираются: совп�
   `pipeline stage=…` (время, цена, поиски) в журнал сервиса.
   Доработка (`/revise`) — из карточки финала: берёт исследование и финал
   родительского прогона, Grok повторно не вызывается (API не тратится).
+  Беседа (`/chat`, с 25.10.2026) — тоже из карточки финала: одна модель на выбор
+  (Claude или GPT/Codex, можно менять по ходу) отвечает по всему материалу
+  прогона (`PIPELINE_CHAT`: вопрос+вложения, Grok, выписки, черновик, ревью,
+  финал, on-chain evidence) с веб-инструментами для непокрытого. Без сессий CLI:
+  каждый ход заново получает материал и всю историю. Хранится в
+  `run["chat"]` того же прогона; ответ — серверная задача (`CHATTING`),
+  браузер опрашивает `GET /chat`. В истории такие прогоны помечены 💬.
 - `account_status.py` — статус входа и тариф CLI (Claude `auth status`,
   Codex `account/read`), кэш на минуту.
 - `test_connections.py` — тесты: `python -m unittest test_connections -v`
