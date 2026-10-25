@@ -79,3 +79,38 @@ def recent(limit: int = 30) -> list[dict]:
                     "status": run["status"], "ok": run["ok"], "parent": run.get("parent"),
                     "chat": sum(1 for c in run.get("chat", []) if c["role"] == "user")})
     return out
+
+
+def cost(run: dict) -> dict:
+    """Estimated API spend of one run: its own pipeline stages (stages reused
+    from a parent carry no cost) and its conversation turns."""
+    stages = [e for e in run["events"] if e.get("type") == "stage"]
+    chat = [c for c in run.get("chat", []) if c.get("role") == "assistant"]
+    return {"pipeline": sum(e.get("cost_usd") or 0 for e in stages),
+            "chat": sum(c.get("cost_usd") or 0 for c in chat), "turns": len(chat),
+            "est": any(e.get("tokens_est") for e in stages + chat)}
+
+
+def thread(run_id: str) -> list[dict]:
+    """The run's whole topic: the root run and every revision made from it
+    (or from its revisions), oldest first."""
+    every = {}
+    for path in runs_dir().glob("*.json"):
+        try:
+            item = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        every[item["id"]] = item
+    root = run_id
+    while every.get(root, {}).get("parent") in every:
+        root = every[root]["parent"]
+    children: dict[str, list[str]] = {}
+    for item in every.values():
+        children.setdefault(item.get("parent"), []).append(item["id"])
+    out, todo = [], [root]
+    while todo:
+        current = todo.pop()
+        if current in every:
+            out.append(every[current])
+            todo += children.get(current, [])
+    return sorted(out, key=lambda item: item["id"])

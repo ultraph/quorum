@@ -1035,6 +1035,18 @@ async def api_run(run_id: str) -> JSONResponse:
                          "attachments": run.get("attachments", [])})
 
 
+@app.get("/api/runs/{run_id}/cost")
+async def api_run_cost(run_id: str) -> JSONResponse:
+    """Estimated spend of this run and of its whole topic (root run, every
+    revision, every conversation turn)."""
+    if _stored_run(run_id) is None:
+        return JSONResponse({"error": "Прогон не найден."}, status_code=404)
+    parts = [{"id": r["id"], "created": r["created"], "revision": bool(r.get("parent")), **runs.cost(r)}
+             for r in await asyncio.to_thread(runs.thread, run_id)]
+    return JSONResponse({"parts": parts, "total": sum(p["pipeline"] + p["chat"] for p in parts),
+                         "est": any(p["est"] for p in parts)})
+
+
 @app.get("/api/runs/{run_id}/stream")
 async def api_run_stream(run_id: str):
     run = _stored_run(run_id)
@@ -1576,12 +1588,7 @@ async function followRun(resp){
         } else if(o.type==='done'){
           status.innerHTML=o.ok ? '<span class="banner ok">✓ Final is ready for approval</span>'
             : '<span class="banner err">✗ Pipeline stopped — see the failed stage.</span>';
-          if(o.ok && typeof o.total_cost_usd==='number'){
-            const total=document.createElement('div'); total.className='cost-total';
-            total.innerHTML=`<div>Примерная API-стоимость этого запроса</div><div class="amount">${fmtCost(o.total_cost_usd)}</div>`+
-              `<div class="foot">По отображённым ${o.cost_est?'оценочным':'токенам'} input/output, без cache, web/tool tokens. Через CLI это не отдельное списание.</div>`;
-            out.appendChild(total);
-          }
+          if(typeof o.total_cost_usd==='number') renderCost(runId);
         }
       }
     }
@@ -1606,6 +1613,23 @@ function reviseBox(getRunId){
   });
   return box;
 }
+// Spend of the whole topic: the run, its revisions and every conversation turn.
+async function renderCost(runId){
+  if(!runId) return;
+  let d; try{ const r=await fetch('/api/runs/'+encodeURIComponent(runId)+'/cost'); if(!r.ok) return; d=await r.json(); }catch(e){ return; }
+  const out=document.getElementById('pipelineOut');
+  let box=out.querySelector('.cost-total');
+  if(!box){ box=document.createElement('div'); box.className='cost-total'; out.appendChild(box); }
+  const rows=[];
+  d.parts.forEach(p=>{
+    const mark=p.id===runId?' ← открыт':'';
+    rows.push(`<li>${p.revision?'✎ Доработка':'Прогон'} от ${esc(p.created)}: ${fmtCost(p.pipeline)||'$0'}${mark}</li>`);
+    if(p.turns) rows.push(`<li>💬 Беседа к нему (${p.turns} ${p.turns===1?'ответ':p.turns<5?'ответа':'ответов'}): ${fmtCost(p.chat)||'$0'}</li>`);
+  });
+  box.innerHTML=`<div>Примерная API-стоимость темы целиком</div><div class="amount">${fmtCost(d.total)||'$0'}</div>`+
+    (rows.length>1?`<ul class="foot" style="margin:8px 0 0;padding-left:18px">${rows.join('')}</ul>`:'')+
+    `<div class="foot">Оценка по ${d.est?'приблизительным ':''}токенам этапов, кэшу и поискам; этапы, взятые из прошлого прогона, повторно не считаются. Через CLI (подписка) это не отдельное списание.</div>`;
+}
 // Conversation with one model over everything this run collected.
 const CHAT_NAMES={claude:'Claude',codex:'GPT/Codex'};
 function chatBox(getRunId){
@@ -1620,8 +1644,9 @@ function chatBox(getRunId){
   let timer=null, shown=-1;
   function render(state){
     const msgs=state.chat||[];
+    let fresh=false;
     if(msgs.length!==shown){
-      shown=msgs.length; log.innerHTML='';
+      const first=shown<0; shown=msgs.length; log.innerHTML='';
       msgs.forEach((c,i)=>{
         const d=document.createElement('div'); d.className='chat-msg '+(c.role==='user'?'user':c.role==='error'?'error':'');
         if(c.role==='user'){
@@ -1631,11 +1656,12 @@ function chatBox(getRunId){
         } else {
           const cost=fmtCost(c.cost_usd);
           d.innerHTML=`<div class="who">${esc(CHAT_NAMES[c.model]||c.name)} · ${esc(c.served_model||'')} · ${esc(c.time||'')} · ${c.seconds}s${fmtTok(c)}${cost?' · '+cost:''}${fmtSearches(c.searches)}</div><div class="md">${mdToHtml(c.text)}</div>`;
-          addCopyActions(d,c.text,'chat-'+(i+1));
+          addCopyActions(d,c.text,'chat-'+(i+1)); fresh=true;
           sel.value=c.model||sel.value;
         }
         log.appendChild(d);
       });
+      if(fresh && !first) renderCost(getRunId());
     }
     btn.disabled=!!state.chat_pending;
     if(state.chat_pending){

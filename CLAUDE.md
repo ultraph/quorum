@@ -64,7 +64,7 @@ Polygon — 402), другие сети НЕ перебираются: совп�
   оценка API-цены (`api_price_estimate`), CLI-интерфейс и мастер `--setup`.
 - `webapp.py` — FastAPI + весь фронтенд в строке `INDEX_HTML` (HTML/CSS/JS).
   Эндпоинты: `/api/models`, `/api/pipeline` (SSE),
-  `/api/connections/{claude,gpt,grok}`, `/api/grok_prompt`, `/api/runs[/{id}[/stream|/revise|/chat]]`. Промпты этапов —
+  `/api/connections/{claude,gpt,grok}`, `/api/grok_prompt`, `/api/runs[/{id}[/stream|/revise|/chat|/cost]]`. Промпты этапов —
   `GROK_RESEARCH`, `PIPELINE_*`.
 - `connections.py` — переключение «подписка (CLI) ↔ API-ключ» (у Grok —
   «API ↔ вручную») из веба;
@@ -83,6 +83,9 @@ Polygon — 402), другие сети НЕ перебираются: совп�
   каждый ход заново получает материал и всю историю. Хранится в
   `run["chat"]` того же прогона; ответ — серверная задача (`CHATTING`),
   браузер опрашивает `GET /chat`. В истории такие прогоны помечены 💬.
+  Стоимость (`GET /cost`, `runs.thread`/`runs.cost`) — по теме целиком: корневой
+  прогон + все доработки + все ответы беседы, с разбивкой; обновляется после
+  каждого ответа беседы. Этапы, взятые из родителя, повторно не считаются.
 - `account_status.py` — статус входа и тариф CLI (Claude `auth status`,
   Codex `account/read`), кэш на минуту.
 - `test_connections.py` — тесты: `python -m unittest test_connections -v`
