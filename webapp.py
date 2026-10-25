@@ -214,9 +214,33 @@ def index() -> str:
 @app.get("/api/models")
 def api_models() -> JSONResponse:
     cfg = q.load_config()
+    def reasoning(m: q.Model) -> str:
+        if m.provider == "openai":
+            if m.auth == "api":
+                return "standard · medium (задано Quorum)"
+            try:
+                codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+                config = (codex_home / "config.toml").read_text()
+                top_level = config.split("\n[", 1)[0]
+                match = re.search(r'^\s*model_reasoning_effort\s*=\s*"(low|medium|high|xhigh|max)"',
+                                  top_level, re.MULTILINE)
+                effort = match.group(1) if match else None
+            except OSError:
+                effort = None
+            return f"standard · {effort} (настройка Codex)" if effort else "standard · уровень по умолчанию модели"
+        if m.provider == "anthropic":
+            if m.auth == "cli" and m.model == "claude-opus-5-5":
+                return "адаптивный · medium (по умолчанию Claude Code)"
+            return "адаптивный · уровень не задан в Quorum"
+        if m.provider == "xai" and m.auth == "api" and m.model == "grok-4.7":
+            return "high (по умолчанию xAI API)"
+        if m.provider == "xai" and m.auth == "manual":
+            return "зависит от настроек Grok"
+        return "уровень не задан в Quorum"
     def item(m: q.Model) -> dict:
         return {"name": m.name, "provider": m.provider, "model": m.model,
                 "auth": m.auth,
+                "reasoning": reasoning(m),
                 # Grok joins the ad-hoc panel only when it is callable via API.
                 "enabled": m.enabled and (m.provider != "xai" or (m.auth == "api" and bool(m.api_key))),
                 "subscription": m.subscription,
@@ -1161,7 +1185,7 @@ function fmtModel(m){
   if(m.provider==='xai'){
     const how=m.auth==='api' ? (m.has_api_key?'Через xAI API · оплата по токенам и поиску':'xAI API · ключ не задан') : 'Вручную · ответ Grok вставляется в поле 2';
     const gprice=p && m.auth==='api' ? `<div class="foot">Regular API Price $${p.input_per_m}/$${p.output_per_m} за 1M in/out</div>` : '';
-    return `<div style="margin:6px 0"><strong>Grok: ${esc(p?p.label:m.model)}</strong><div>${esc(how)}</div>${gprice}</div>`;
+    return `<div style="margin:6px 0"><strong>Grok: ${esc(p?p.label:m.model)}</strong><div>${esc(how)}</div><div>Reasoning: ${esc(m.reasoning)}</div>${gprice}</div>`;
   }
   const a=m.account || {}, service=m.provider==='anthropic' ? 'Claude' : 'ChatGPT';
   const cli=m.provider==='anthropic' ? 'Claude Code CLI' : 'Codex CLI';
@@ -1176,7 +1200,7 @@ function fmtModel(m){
   const model=p ? p.label : m.model;
   const price=p ? `<div class="foot">Regular API Price $${p.input_per_m}/$${p.output_per_m} за 1M in/out</div>` : '';
   return `<div style="margin:6px 0"><strong>${esc(m.provider==='anthropic'?'Claude':'GPT / Codex')}: ${esc(model)}</strong>`+
-    `<div>${esc(auth)}</div>${price}</div>`;
+    `<div>${esc(auth)}</div><div>Reasoning: ${esc(m.reasoning)}</div>${price}</div>`;
 }
 let GROK_MODE='manual';
 function applyGrokMode(){
@@ -1227,7 +1251,7 @@ async function loadPipelineModels(){
       const a=m.account||{};
       const how=m.auth==='api'?'API':m.auth==='manual'?'вручную':'подписка';
       const warn=(m.auth==='api' && !m.has_api_key) || (m.auth==='cli' && a.status!=='signed_in');
-      return `<strong>${esc(label)}</strong> <span>(${how}${warn?' ⚠':''})</span>`;
+      return `<strong>${esc(label)}</strong> <span>(${how}${warn?' ⚠':''}; Reasoning: ${esc(m.reasoning)})</span>`;
     }).join(' → ');
     document.getElementById('modelsSummary').innerHTML=short;
     box.innerHTML=needed.map(fmtModel).join('')+
