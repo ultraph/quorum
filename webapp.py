@@ -217,7 +217,7 @@ def api_models() -> JSONResponse:
     def reasoning(m: q.Model) -> str:
         if m.provider == "openai":
             if m.auth == "api":
-                return "standard · medium (задано Quorum)"
+                return "medium"
             try:
                 codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
                 config = (codex_home / "config.toml").read_text()
@@ -227,16 +227,16 @@ def api_models() -> JSONResponse:
                 effort = match.group(1) if match else None
             except OSError:
                 effort = None
-            return f"standard · {effort} (настройка Codex)" if effort else "standard · уровень по умолчанию модели"
+            return effort or "авто"
         if m.provider == "anthropic":
             if m.auth == "cli" and m.model == "claude-opus-5-5":
-                return "адаптивный · medium (по умолчанию Claude Code)"
-            return "адаптивный · уровень не задан в Quorum"
+                return "medium"
+            return "авто"
         if m.provider == "xai" and m.auth == "api" and m.model == "grok-4.7":
-            return "high (по умолчанию xAI API)"
+            return "high"
         if m.provider == "xai" and m.auth == "manual":
-            return "зависит от настроек Grok"
-        return "уровень не задан в Quorum"
+            return "вручную"
+        return "авто"
     def item(m: q.Model) -> dict:
         return {"name": m.name, "provider": m.provider, "model": m.model,
                 "auth": m.auth,
@@ -1185,7 +1185,7 @@ function fmtModel(m){
   if(m.provider==='xai'){
     const how=m.auth==='api' ? (m.has_api_key?'Через xAI API · оплата по токенам и поиску':'xAI API · ключ не задан') : 'Вручную · ответ Grok вставляется в поле 2';
     const gprice=p && m.auth==='api' ? `<div class="foot">Regular API Price $${p.input_per_m}/$${p.output_per_m} за 1M in/out</div>` : '';
-    return `<div style="margin:6px 0"><strong>Grok: ${esc(p?p.label:m.model)}</strong><div>${esc(how)}</div><div>Reasoning: ${esc(m.reasoning)}</div>${gprice}</div>`;
+    return `<div style="margin:6px 0"><strong>Grok: ${esc(p?p.label:m.model)} (${esc(m.reasoning)})</strong><div>${esc(how)}</div>${gprice}</div>`;
   }
   const a=m.account || {}, service=m.provider==='anthropic' ? 'Claude' : 'ChatGPT';
   const cli=m.provider==='anthropic' ? 'Claude Code CLI' : 'Codex CLI';
@@ -1199,8 +1199,8 @@ function fmtModel(m){
   }
   const model=p ? p.label : m.model;
   const price=p ? `<div class="foot">Regular API Price $${p.input_per_m}/$${p.output_per_m} за 1M in/out</div>` : '';
-  return `<div style="margin:6px 0"><strong>${esc(m.provider==='anthropic'?'Claude':'GPT / Codex')}: ${esc(model)}</strong>`+
-    `<div>${esc(auth)}</div><div>Reasoning: ${esc(m.reasoning)}</div>${price}</div>`;
+  return `<div style="margin:6px 0"><strong>${esc(m.provider==='anthropic'?'Claude':'GPT / Codex')}: ${esc(model)} (${esc(m.reasoning)})</strong>`+
+    `<div>${esc(auth)}</div>${price}</div>`;
 }
 let GROK_MODE='manual';
 function applyGrokMode(){
@@ -1249,9 +1249,8 @@ async function loadPipelineModels(){
       const name=m.provider==='xai'?'Grok':m.provider==='anthropic'?'Claude':'GPT';
       const label=m.pricing ? m.pricing.label : name+' '+m.model;
       const a=m.account||{};
-      const how=m.auth==='api'?'API':m.auth==='manual'?'вручную':'подписка';
       const warn=(m.auth==='api' && !m.has_api_key) || (m.auth==='cli' && a.status!=='signed_in');
-      return `<strong>${esc(label)}</strong> <span>(${how}${warn?' ⚠':''}; Reasoning: ${esc(m.reasoning)})</span>`;
+      return `<strong>${esc(label)} (${esc(m.reasoning)})</strong>${warn?' ⚠':''}`;
     }).join(' → ');
     document.getElementById('modelsSummary').innerHTML=short;
     box.innerHTML=needed.map(fmtModel).join('')+
