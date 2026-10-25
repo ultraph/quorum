@@ -1180,12 +1180,17 @@ function fmtCost(v){
   if(typeof v!=='number' || !Number.isFinite(v)) return '';
   return v<0.01 ? `≈$${v.toFixed(4)}` : `≈$${v.toFixed(2)}`;
 }
+function modelMeta(m){
+  const mode=m.auth==='api' || (m.auth==='cli' && m.account?.mode==='api') ? 'API'
+    : m.auth==='cli' ? 'подписка' : 'вручную';
+  return m.reasoning===mode ? mode : m.reasoning+' · '+mode;
+}
 function fmtModel(m){
   const p=m.pricing;
   if(m.provider==='xai'){
     const how=m.auth==='api' ? (m.has_api_key?'Через xAI API · оплата по токенам и поиску':'xAI API · ключ не задан') : 'Вручную · ответ Grok вставляется в поле 2';
     const gprice=p && m.auth==='api' ? `<div class="foot">Regular API Price $${p.input_per_m}/$${p.output_per_m} за 1M in/out</div>` : '';
-    return `<div style="margin:6px 0"><strong>Grok: ${esc(p?p.label:m.model)} (${esc(m.reasoning)})</strong><div>${esc(how)}</div>${gprice}</div>`;
+    return `<div style="margin:6px 0"><strong>Grok: ${esc(p?p.label:m.model)}</strong> (${esc(modelMeta(m))})<div>${esc(how)}</div>${gprice}</div>`;
   }
   const a=m.account || {}, service=m.provider==='anthropic' ? 'Claude' : 'ChatGPT';
   const cli=m.provider==='anthropic' ? 'Claude Code CLI' : 'Codex CLI';
@@ -1199,7 +1204,7 @@ function fmtModel(m){
   }
   const model=p ? p.label : m.model;
   const price=p ? `<div class="foot">Regular API Price $${p.input_per_m}/$${p.output_per_m} за 1M in/out</div>` : '';
-  return `<div style="margin:6px 0"><strong>${esc(m.provider==='anthropic'?'Claude':'GPT / Codex')}: ${esc(model)} (${esc(m.reasoning)})</strong>`+
+  return `<div style="margin:6px 0"><strong>${esc(m.provider==='anthropic'?'Claude':'GPT / Codex')}: ${esc(model)}</strong> (${esc(modelMeta(m))})`+
     `<div>${esc(auth)}</div>${price}</div>`;
 }
 let GROK_MODE='manual';
@@ -1250,7 +1255,7 @@ async function loadPipelineModels(){
       const label=m.pricing ? m.pricing.label : name+' '+m.model;
       const a=m.account||{};
       const warn=(m.auth==='api' && !m.has_api_key) || (m.auth==='cli' && a.status!=='signed_in');
-      return `<strong>${esc(label)} (${esc(m.reasoning)})</strong>${warn?' ⚠':''}`;
+      return `<strong>${esc(label)}</strong> (${esc(modelMeta(m))})${warn?' ⚠':''}`;
     }).join(' → ');
     document.getElementById('modelsSummary').innerHTML=short;
     box.innerHTML=needed.map(fmtModel).join('')+
