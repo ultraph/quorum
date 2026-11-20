@@ -1048,7 +1048,9 @@ async def _council_flow(run: dict) -> str:
                 _request(run, [_paste_item("judge", "gemini", "судья: выбрать победителя", prompt, False)])
                 return "waiting"
             judge = models["gemini"] if run.get("judge") == "gemini" else models["deepseek"]
-            await _council_call(run, [("judge", judge, prompt, False)])
+            # Web on (20.11.2026): without it Gemini called real forum links "fake".
+            # The DeepSeek API path has no web tools and ignores the flag.
+            await _council_call(run, [("judge", judge, prompt, True)])
             if _ok(res, "judge") and not council.parse_winner(res["judge"]["answer"], by_label):
                 # Re-shown with the error; cost None so the spend is not counted twice.
                 res["judge"] = {**res["judge"], "error": "Судья не закончил ответ строкой WINNER: A/B.",
