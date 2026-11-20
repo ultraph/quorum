@@ -1747,6 +1747,47 @@ function setMode(m){
   document.getElementById('councilOpts').hidden=MODE==='pipeline';
   document.getElementById('judgeBox').hidden=MODE!=='duel';
   applyGrokMode();
+  renderModelsSummary();
+}
+// The models line under the mode switch shows only who takes part in the
+// selected mode (Grok is not in a duel unless pasted as critic, etc.).
+let MODELS_DATA=null;
+function modelLine(m,name){
+  const label=m.pricing ? m.pricing.label : name+' '+m.model;
+  const a=m.account||{};
+  const warn=(m.auth==='api' && !m.has_api_key) || (m.auth==='cli' && a.status!=='signed_in');
+  return `<strong>${esc(label)}</strong> (${esc(modelMeta(m))})${warn?' ⚠':''}`;
+}
+function renderModelsSummary(){
+  const data=MODELS_DATA; if(!data) return;
+  const box=document.getElementById('pipelineModels');
+  const by=p=>data.panel.find(m=>m.provider===p && (m.enabled || p==='xai'));
+  const claude=by('anthropic'), gpt=by('openai'), grok=by('xai');
+  const deepseek=data.panel.find(m=>m.provider==='deepseek' && m.model==='deepseek-v4-pro' && m.enabled)
+    || data.panel.find(m=>m.provider==='deepseek' && m.enabled);
+  const ds=deepseek ? `<strong>${esc(deepseek.pricing?deepseek.pricing.label:deepseek.model)}</strong> (API)` : '<strong>DeepSeek</strong> ⚠ не включён';
+  const manual=n=>`<strong>${n}</strong> (вручную)`;
+  const pair=[claude&&modelLine(claude,'Claude'), gpt&&modelLine(gpt,'GPT')].filter(Boolean);
+  let short;
+  if(MODE==='duel'){
+    const judge=document.getElementById('duelJudge').value==='gemini' ? manual('Gemini') : ds;
+    short=pair.join(' ‖ ')+' → судья: '+judge+' → критик: '+manual('Grok')+', по желанию';
+  } else if(MODE==='council'){
+    short='авторы: '+pair.concat([ds, manual('Grok'), manual('Gemini')]).join(' ‖ ')+
+      ' → оценка: Claude, GPT, DeepSeek → критик: '+manual('Grok')+', по желанию';
+  } else {
+    short=[grok&&modelLine(grok,'Grok'), claude&&modelLine(claude,'Claude'), gpt&&modelLine(gpt,'GPT')]
+      .filter(Boolean).join(' → ');
+  }
+  document.getElementById('modelsSummary').innerHTML=short;
+  const list=MODE==='pipeline' ? [grok,claude,gpt] : [claude,gpt];
+  box.innerHTML=list.filter(Boolean).map(fmtModel).join('')+
+    (MODE!=='pipeline' && deepseek ? `<div style="margin:6px 0"><strong>DeepSeek: ${esc(deepseek.pricing?deepseek.pricing.label:deepseek.model)}</strong> (API)`+
+      (deepseek.pricing?`<div class="foot">Regular API Price $${deepseek.pricing.input_per_m}/$${deepseek.pricing.output_per_m} за 1M in/out</div>`:'')+'</div>' : '')+
+    (MODE!=='pipeline' ? '<div class="foot">Grok и Gemini в этом режиме — только ручная вставка из их чатов.</div>' : '')+
+    '<div class="foot" style="margin-bottom:10px">Статус аккаунтов проверяется через CLI раз в минуту. Regular API Price — справочная цена API.</div>';
+  // Grok's API/manual switch only matters for the fact-check.
+  document.getElementById('grokConnectionSettings').hidden=MODE!=='pipeline';
 }
 async function loadPipelineModels(){
   const box=document.getElementById('pipelineModels');
@@ -1781,21 +1822,8 @@ async function loadPipelineModels(){
       document.getElementById('claudeKeyState').textContent=claude.has_api_key?'API key сохранён на сервере.':'Сохранённого API key нет.';
       document.getElementById('removeClaudeKey').disabled=!claude.has_api_key;
     }
-    const order=['xai','anthropic','openai'];
-    const needed=data.panel.filter(m=>(m.enabled || m.provider==='xai') && order.includes(m.provider))
-      .sort((a,b)=>order.indexOf(a.provider)-order.indexOf(b.provider));
-    // One line in pipeline order; details (plan, login, list price) on demand.
-    // Problems stay visible in the collapsed line.
-    const short=needed.map(m=>{
-      const name=m.provider==='xai'?'Grok':m.provider==='anthropic'?'Claude':'GPT';
-      const label=m.pricing ? m.pricing.label : name+' '+m.model;
-      const a=m.account||{};
-      const warn=(m.auth==='api' && !m.has_api_key) || (m.auth==='cli' && a.status!=='signed_in');
-      return `<strong>${esc(label)}</strong> (${esc(modelMeta(m))})${warn?' ⚠':''}`;
-    }).join(' → ');
-    document.getElementById('modelsSummary').innerHTML=short;
-    box.innerHTML=needed.map(fmtModel).join('')+
-      '<div class="foot" style="margin-bottom:10px">Статус аккаунтов проверяется через CLI раз в минуту. Regular API Price — справочная цена API.</div>';
+    MODELS_DATA=data;
+    renderModelsSummary();
   }catch(e){ document.getElementById('modelsSummary').textContent='⚠ Не удалось загрузить конфигурацию моделей.'; }
 }
 async function changeClaudeConnection(testOnly=false,remove=false){
@@ -2294,6 +2322,7 @@ function addCopyActions(cardEl, text, slug){
 
 document.getElementById('runPipeline').addEventListener('click',runPipeline);
 document.querySelectorAll('.mode-btn').forEach(b=>b.addEventListener('click',()=>setMode(b.dataset.mode)));
+document.getElementById('duelJudge').addEventListener('change',renderModelsSummary);
 (function(){
   let saved='pipeline', closed=false;
   try{ saved=localStorage.getItem('mode')||'pipeline'; closed=localStorage.getItem('manualClosed')==='1'; }catch(e){}
