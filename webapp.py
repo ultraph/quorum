@@ -1073,8 +1073,10 @@ async def _council_flow(run: dict) -> str:
         if not run.get("apply_go"):
             _request(run, [_paste_item("apply", synth, "учесть критику Grok", "", True, "confirm")], optional=True)
             return "waiting"
+        # Web on: the critic's claims and links get checked before they are
+        # adopted (20.11.2026: without it, pasted Grok facts went in unverified).
         await _council_call(run, [("apply", models[synth],
-                                   council.apply_prompt(question, today, final, res["critic"]["answer"]), False)])
+                                   council.apply_prompt(question, today, final, res["critic"]["answer"]), True)])
         run["apply_go"] = False
         if not _ok(res, "apply"):
             _emit(run, {"type": "error", "message": "Финал с учётом критики не получен — нажми «Учесть критику» ещё раз."})
@@ -1542,7 +1544,7 @@ INDEX_HTML = r"""<!doctype html>
         <tr><td>Финал</td><td>Claude, до 220 слов</td><td>Проигравший автор: основа — победитель + лучшее из своего</td><td>Claude; если победил ответ Claude — Codex</td></tr>
         <tr><td>Критик</td><td>—</td><td colspan="2">Grok вручную, по желанию: разносит финал → кнопка «Учесть критику» переписывает его</td></tr>
         <tr><td>Ручных вставок</td><td>1 — Grok, до запуска</td><td>0–2 — Gemini-судья, Grok-критик</td><td>2–3 — Grok и Gemini как авторы, Grok-критик</td></tr>
-        <tr><td>Время</td><td>≈3–4 мин (медиана прогонов)</td><td>≈3–5 мин (оценка)</td><td>≈6–10 мин + твои вставки (оценка)</td></tr>
+        <tr><td>Время</td><td>≈3–4 мин (медиана прогонов)</td><td>≈5 мин (замер)</td><td>≈3–5 мин + твои вставки (замер)</td></tr>
         <tr><td>Деньги</td><td>Claude/Codex — подписка</td><td>подписка + DeepSeek-судья ≈ $0.01</td><td>подписка + DeepSeek ≈ $0.02–0.05</td></tr>
       </table></div>
       <strong>Как работать с ручными вставками (Grok, Gemini)</strong>
@@ -1555,7 +1557,7 @@ INDEX_HTML = r"""<!doctype html>
         <li>Упал шаг — «↻ Продолжить»: повторится только упавший шаг, готовые не пересчитываются.</li>
         <li>После финала — беседа с Claude или Codex по всему материалу; в «Дуэли» и «Совете» авторы в ней уже раскрыты.</li>
       </ol>
-      <div class="foot">Слепота: модели видят ответы только под буквами в случайном порядке; кто есть кто — видно лишь в таблице итога. Время для «Дуэли» и «Совета» — оценка по замерам этапов фактчека (Claude с вебом ≈1,5 мин, Codex ≈1 мин).</div>
+      <div class="foot">Слепота: модели видят ответы только под буквами в случайном порядке; кто есть кто — видно лишь в таблице итога. Время «Дуэли» и «Совета» — по первым прогонам 20.11.2026; в «Дуэли» дольше всех судья DeepSeek (≈2 мин). «Учесть критику» открывает ссылки критика в вебе — это ещё ≈0,5–1 мин.</div>
     </div>
   </details>
   <div class="card">

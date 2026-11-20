@@ -156,7 +156,10 @@ marked [критично], [важно] or [мелочь], with a one-line fix. 
 APPLY = """\
 You wrote the final answer below. A critic whose job is to disagree attacked
 it. Revise the final answer: accept only the criticism that is correct and
-matters (check it; a critic can be wrong), keep everything else.
+matters (a critic can be wrong), keep everything else. Before adopting a
+critic's claim, open its links with your web tools and check that the source
+really says it; a claim you cannot confirm goes in only as unverified, or not
+at all if it would change the conclusion.
 - New facts the critic found with a source (names, numbers, quotes from a
   linked page) are evidence: carry the specific fact into the answer
   explicitly, with its URL, not a vague mention.
