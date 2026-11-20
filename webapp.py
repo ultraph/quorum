@@ -1052,7 +1052,7 @@ async def _council_flow(run: dict) -> str:
         _emit(run, {"type": "ranking", "mode": mode, "rows": rows})
 
     # 3. Final version by the best automatic model that did not write the winner.
-    synth = run.setdefault("synth_model", council.synthesizer(winner, order))
+    synth = run.setdefault("synth_model", council.synthesizer(winner, order, mode))
     if not _ok(res, "synth"):
         await _council_call(run, [("synth", models[synth],
                                    council.synth_prompt(question, today, answers, labels, winner, judging), False)])
@@ -1539,7 +1539,7 @@ INDEX_HTML = r"""<!doctype html>
         <tr><td>Для чего</td><td>Проверить твит, новость, проект, «правда ли…»: что правда и что делать</td><td>Обычное решение или текст: быстро получить лучшую из двух версий</td><td>Большое решение: деньги, архитектура, долгие последствия</td></tr>
         <tr><td>Кто пишет</td><td>Цепочка: Grok ищет → Claude анализ → Codex проверка → Claude финал</td><td>Claude и Codex — параллельно, не видя друг друга</td><td>Claude, Codex, DeepSeek + Grok и Gemini (вручную) — каждый свой ответ</td></tr>
         <tr><td>Кто выбирает</td><td>Нет выбора — последовательная проверка</td><td>Судья DeepSeek (авто) или Gemini (вручную): ответы под метками A/B в случайном порядке</td><td>Claude, Codex, DeepSeek оценивают чужие ответы вслепую, свой — никогда; итог по сумме мест (Borda)</td></tr>
-        <tr><td>Финал</td><td>Claude, до 220 слов</td><td>Проигравший автор: основа — победитель + лучшее из своего</td><td>Лучшая автомодель, не писавшая ответ-победитель</td></tr>
+        <tr><td>Финал</td><td>Claude, до 220 слов</td><td>Проигравший автор: основа — победитель + лучшее из своего</td><td>Claude; если победил ответ Claude — Codex</td></tr>
         <tr><td>Критик</td><td>—</td><td colspan="2">Grok вручную, по желанию: разносит финал → кнопка «Учесть критику» переписывает его</td></tr>
         <tr><td>Ручных вставок</td><td>1 — Grok, до запуска</td><td>0–2 — Gemini-судья, Grok-критик</td><td>2–3 — Grok и Gemini как авторы, Grok-критик</td></tr>
         <tr><td>Время</td><td>≈3–4 мин (медиана прогонов)</td><td>≈3–5 мин (оценка)</td><td>≈6–10 мин + твои вставки (оценка)</td></tr>
@@ -1733,7 +1733,7 @@ const MODES={
     flow:'Grok ищет → Claude проверяет источники → GPT/Codex делает ревью → Claude готовит финал', btn:'Run pipeline'},
   duel:{desc:'Дуэль: Claude и Codex пишут вслепую, судья выбирает победителя, проигравший собирает финал. Grok-критик — по желанию.',
     flow:'Claude ‖ Codex → судья → финал → Grok-критик (по желанию)', btn:'⚔ Запустить дуэль'},
-  council:{desc:'Совет: пять авторов (Grok и Gemini — вручную), слепая взаимная оценка без самооценки, финал пишет лучшая модель, не писавшая ответ-победитель.',
+  council:{desc:'Совет: пять авторов (Grok и Gemini — вручную), слепая взаимная оценка без самооценки, финал пишет Claude (если победил Claude — Codex).',
     flow:'Claude ‖ Codex ‖ DeepSeek ‖ Grok ‖ Gemini → слепая оценка → финал → Grok-критик (по желанию)', btn:'🏛 Созвать совет'},
 };
 let MODE='pipeline';
@@ -1861,7 +1861,7 @@ function councilLabel(stage){
   const [kind,who]=stage.split(':');
   if(kind==='author') return (WHO[who]||who)+' — ответ вслепую';
   if(kind==='review') return (WHO[who]||who)+' — слепая оценка чужих ответов';
-  return {judge:'Судья — выбор победителя',synth:'Финальная версия',critic:'Grok — критик',
+  return {judge:'Судья — выбор победителя',synth:'Финальная версия',synth_old:'Прежний финал (DeepSeek, старое правило)',critic:'Grok — критик',
     apply:'Финал с учётом критики'}[stage]||stage;
 }
 const FINAL_STAGES=['final','synth','apply'];

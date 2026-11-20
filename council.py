@@ -256,9 +256,14 @@ def aggregate(reviews: dict, letters) -> list[dict]:
     return out
 
 
-def synthesizer(winner: str, order) -> str:
-    """The best-placed automatic model that did not write the winning answer.
-    `order` is authors best→worst (duel: winner, loser)."""
+def synthesizer(winner: str, order, mode: str = "duel") -> str:
+    """Who writes the final; never the author of the winning answer.
+    Duel: the losing author (`order` is winner, loser). Council: Claude, or
+    Codex when Claude won (owner's decision 20.11.2026: the best-ranked
+    automatic author was DeepSeek, whose final re-invented unsupported
+    percentages and dropped the sources)."""
+    if mode == "council":
+        return "codex" if winner == "claude" else "claude"
     for key in order:
         if key != winner and key in AUTO:
             return key

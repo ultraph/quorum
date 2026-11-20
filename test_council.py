@@ -52,9 +52,11 @@ class LogicTests(unittest.TestCase):
 
     def test_synthesizer_never_the_winner(self):
         self.assertEqual(council.synthesizer("claude", ["claude", "codex"]), "codex")
-        self.assertEqual(council.synthesizer("grok", ["grok", "deepseek", "claude"]), "deepseek")
-        self.assertEqual(council.synthesizer("codex", ["codex", "gemini", "claude"]), "claude")
-
+        self.assertEqual(council.synthesizer("codex", ["codex", "claude"]), "claude")
+        # Council: Claude regardless of ranking, Codex when Claude won.
+        self.assertEqual(council.synthesizer("grok", ["grok", "deepseek", "claude"], "council"), "claude")
+        self.assertEqual(council.synthesizer("codex", ["codex", "gemini", "deepseek", "claude"], "council"), "claude")
+        self.assertEqual(council.synthesizer("claude", ["claude", "deepseek"], "council"), "codex")
 
 def fake_config():
     return q.Config(panel=[

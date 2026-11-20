@@ -111,8 +111,8 @@ Besides the research pipeline, the web UI has two blind multi-model modes
   author merges the winner with its own best points.
 - **Council** — Claude, GPT/Codex, DeepSeek, plus Grok and Gemini pasted by hand,
   each answer; the automatic models grade the others blind (never their own),
-  rankings are aggregated (normalized Borda), and the best-placed model that did
-  not write the winner writes the final.
+  rankings are aggregated (normalized Borda), and Claude writes the final
+  (GPT/Codex when Claude's answer won).
 - Optionally Grok (pasted by hand) attacks the final, and its author can apply
   the valid points. Runs pause for manual pastes and resume where they stopped.
 
