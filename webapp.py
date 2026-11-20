@@ -31,6 +31,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 import quorum as q
 from account_status import account_status
 import connections
+import council
 import runs
 
 app = FastAPI(title="quorum")
@@ -794,6 +795,9 @@ async def api_extract(req: Request) -> JSONResponse:
 
 
 async def _execute(run: dict) -> None:
+    if run.get("mode") in council.MODES:
+        await _execute_council(run)
+        return
     try:
         # A revision reuses the parent's research and sees its final answer;
         # the stored "revision" stays the user's own short remark.
@@ -889,6 +893,298 @@ async def api_revise(run_id: str, req: Request):
     return await _start(run)
 
 
+# --- «Дуэль» / «Совет»: blind multi-model modes (council.py) -----------------
+# A run is a resumable state machine: every finished step is stored in
+# run["results"]; a step that needs a manual paste (Grok/Gemini chats) parks
+# the run as status "waiting" and POST /manual continues it from there. A
+# failed or interrupted run continues the same way, skipping finished steps.
+
+def _council_models(cfg) -> dict:
+    enabled = [m for m in cfg.panel if m.enabled]
+    deepseek = (next((m for m in enabled if m.provider == "deepseek" and m.model == "deepseek-v4-pro"), None)
+                or next((m for m in enabled if m.provider == "deepseek"), None))
+    return {"claude": next((m for m in enabled if m.provider == "anthropic"), None),
+            "codex": next((m for m in enabled if m.provider == "openai"), None),
+            "deepseek": deepseek}
+
+
+def _ok(res: dict, stage: str) -> bool:
+    return stage in res and not res[stage].get("error")
+
+
+def _emit(run: dict, event: dict) -> None:
+    run["events"].append(event)
+    runs.save(run)  # synchronous on purpose: see _execute_council
+
+
+def _manual_event(stage: str, key: str, text: str) -> dict:
+    return {"type": "stage", "stage": stage, "name": council.NAMES[key], "provider": key,
+            "model": "вручную", "manual": True, "answer": text, "error": "", "seconds": 0,
+            "tokens_in": 0, "tokens_out": 0, "tokens_est": False, "cost_usd": None, "searches": {}}
+
+
+def _request(run: dict, items: list[dict], optional: bool = False) -> None:
+    """Ask the user for manual pastes; each item is announced once."""
+    fresh = [i for i in items if i["key"] not in run["requested"]]
+    for item in items:
+        if item["key"] not in run["pending"]:
+            run["pending"].append(item["key"])
+    if fresh:
+        run["requested"] += [i["key"] for i in fresh]
+        _emit(run, {"type": "manual", "items": fresh, "optional": optional})
+
+
+def _paste_item(stage: str, key: str, title: str, prompt: str, skip: bool, kind: str = "paste") -> dict:
+    return {"key": stage, "who": council.NAMES.get(key, key), "title": title, "prompt": prompt,
+            "skip": skip, "kind": kind}
+
+
+async def _council_call(run: dict, jobs: list[tuple]) -> None:
+    """Run (stage, model, prompt, web) jobs in parallel; each result is emitted
+    as soon as it lands."""
+    res = run["results"]
+
+    async def one(stage, m, prompt, web):
+        result = await asyncio.to_thread(q.run_model, replace(m), prompt, web)
+        event = _stage_event(stage, result)
+        res[stage] = event
+        _emit(run, event)
+
+    for stage, m, _, _ in jobs:
+        _emit(run, {"type": "stage_start", "stage": stage, "name": m.name,
+                    "provider": m.provider, "model": m.model})
+    await asyncio.gather(*(one(*job) for job in jobs))
+
+
+def _fail(run: dict, message: str) -> str:
+    _emit(run, {"type": "error", "message": message})
+    _emit(run, {"type": "done", "ok": False, "retry": True})
+    run["ok"] = False
+    return "done"
+
+
+def _council_cost(run: dict) -> float:
+    return sum(e.get("cost_usd") or 0 for e in run["events"] if e.get("type") == "stage")
+
+
+async def _council_flow(run: dict) -> str:
+    """Advance the run as far as possible. Returns "waiting" or "done"."""
+    mode, res = run["mode"], run["results"]
+    skipped = set(run["skipped"])
+    models = _council_models(q.load_config())
+    question = _with_material(run["question"], run.get("attachments", []))
+    today = time.strftime("%d.%m.%Y")
+    authors = council.AUTHORS[mode]
+    needed = [k for k in authors if k in council.AUTO]
+    if mode == "council" or run.get("judge") == "deepseek":
+        needed.append("deepseek")
+    missing = sorted({council.NAMES[k] for k in needed if models.get(k) is None})
+    if missing:
+        return _fail(run, "Не включены в конфиге Quorum: " + ", ".join(missing) + ".")
+    labels = run.setdefault("labels", council.assign_labels(authors))
+
+    # 1. Independent answers: manual prompts first, so the user can paste
+    # while the automatic authors are still writing.
+    manual = [k for k in authors if k in council.MANUAL]
+    if manual:
+        _request(run, [_paste_item(f"author:{k}", k, "ответ автора",
+                                   council.author_prompt(question, today, k, run["web"]), True)
+                       for k in manual if f"author:{k}" not in res and f"author:{k}" not in skipped])
+    todo = [k for k in authors if k in council.AUTO and not _ok(res, f"author:{k}")]
+    if todo:
+        await _council_call(run, [(f"author:{k}", models[k], council.author_prompt(question, today, k, run["web"]),
+                                   run["web"] and k != "deepseek") for k in todo])
+    failed = [council.NAMES[k] for k in authors if k in council.AUTO and not _ok(res, f"author:{k}")]
+    if failed:
+        return _fail(run, "Не ответили: " + ", ".join(failed) + ". «Продолжить» повторит только их.")
+    if any(f"author:{k}" not in res and f"author:{k}" not in skipped for k in manual):
+        return "waiting"
+    answers = {k: res[f"author:{k}"]["answer"] for k in authors if _ok(res, f"author:{k}")}
+    if len(answers) < 2:
+        return _fail(run, "Для сравнения нужно минимум два ответа.")
+    by_label = {labels[k]: k for k in answers}
+
+    # 2. Blind judging.
+    if mode == "duel":
+        if not _ok(res, "judge"):
+            prompt = council.duel_judge_prompt(question, answers, labels)
+            if run.get("judge") == "gemini":
+                _request(run, [_paste_item("judge", "gemini", "судья: выбрать победителя", prompt, False)])
+                return "waiting"
+            await _council_call(run, [("judge", models["deepseek"], prompt, False)])
+            if _ok(res, "judge") and not council.parse_winner(res["judge"]["answer"], by_label):
+                # Re-shown with the error; cost None so the spend is not counted twice.
+                res["judge"] = {**res["judge"], "error": "Судья не закончил ответ строкой WINNER: A/B.",
+                                "cost_usd": None}
+                _emit(run, res["judge"])
+            if not _ok(res, "judge"):
+                return _fail(run, "Судья не вынес вердикт. «Продолжить» повторит судейство.")
+        judging = res["judge"]["answer"]
+        winner = by_label[council.parse_winner(judging, by_label)]
+        order = [winner] + [k for k in answers if k != winner]
+        rows = [{"label": labels[k], "who": council.NAMES[k], "place": i + 1} for i, k in enumerate(order)]
+    else:
+        todo = [k for k in council.REVIEWERS if not _ok(res, f"review:{k}")]
+        if todo:
+            await _council_call(run, [(f"review:{k}", models[k],
+                                       council.peer_review_prompt(question, answers, labels, k)[0], False)
+                                      for k in todo])
+        reviews, texts = {}, []
+        for k in council.REVIEWERS:
+            if not _ok(res, f"review:{k}"):
+                continue
+            shown = council.peer_review_prompt(question, answers, labels, k)[1]
+            parsed = council.parse_review(res[f"review:{k}"]["answer"], shown)
+            if parsed:
+                reviews[k] = parsed
+                texts.append(f"--- Reviewer {len(texts) + 1} ---\n{res[f'review:{k}']['answer']}")
+            elif "ranking" not in run:
+                _emit(run, {"type": "info", "message": f"Оценка {council.NAMES[k]} без строки RANKING — не учтена."})
+        if len(reviews) < 2:
+            return _fail(run, "Нужно минимум две распознанные слепые оценки. «Продолжить» повторит упавшие.")
+        agg = council.aggregate(reviews, sorted(by_label))
+        order = [by_label[r["label"]] for r in agg]
+        winner, judging = order[0], "\n\n".join(texts)
+        rows = [{**r, "who": council.NAMES[by_label[r["label"]]], "place": i + 1}
+                for i, r in enumerate(agg)]
+    if "ranking" not in run:
+        run["ranking"] = rows
+        _emit(run, {"type": "ranking", "mode": mode, "rows": rows})
+
+    # 3. Final version by the best automatic model that did not write the winner.
+    synth = run.setdefault("synth_model", council.synthesizer(winner, order))
+    if not _ok(res, "synth"):
+        await _council_call(run, [("synth", models[synth],
+                                   council.synth_prompt(question, today, answers, labels, winner, judging), False)])
+        if not _ok(res, "synth"):
+            return _fail(run, "Финальная версия не получена. «Продолжить» повторит этот шаг.")
+    final = res["synth"]["answer"]
+    if not run.get("final_done"):
+        run["final_done"], run["ok"] = True, True
+        _emit(run, {"type": "done", "ok": True, "total_cost_usd": _council_cost(run),
+                    "cost_est": any(e.get("tokens_est") for e in res.values())})
+
+    # 4. Optional: Grok attacks the final by hand, then the author may apply it.
+    if "critic" not in res and "critic" not in skipped:
+        _request(run, [_paste_item("critic", "grok", "критик: разнести финал",
+                                   council.critic_prompt(question, today, final), True)], optional=True)
+        return "waiting"
+    if _ok(res, "critic") and not _ok(res, "apply") and "apply" not in skipped:
+        if not run.get("apply_go"):
+            _request(run, [_paste_item("apply", synth, "учесть критику Grok", "", True, "confirm")], optional=True)
+            return "waiting"
+        await _council_call(run, [("apply", models[synth],
+                                   council.apply_prompt(question, today, final, res["critic"]["answer"]), False)])
+        run["apply_go"] = False
+        if not _ok(res, "apply"):
+            _emit(run, {"type": "error", "message": "Финал с учётом критики не получен — нажми «Учесть критику» ещё раз."})
+            run["requested"].remove("apply")
+            _request(run, [_paste_item("apply", synth, "учесть критику Grok", "", True, "confirm")], optional=True)
+            return "waiting"
+        _emit(run, {"type": "done", "ok": True, "total_cost_usd": _council_cost(run),
+                    "cost_est": any(e.get("tokens_est") for e in res.values())})
+    return "done"
+
+
+def _council_ready(run: dict) -> bool:
+    """A pending manual step got its answer while the flow was running."""
+    done = set(run["results"]) | set(run["skipped"]) | ({"apply"} if run.get("apply_go") else set())
+    return any(key in done for key in run["pending"])
+
+
+async def _execute_council(run: dict) -> None:
+    state = "done"
+    try:
+        while True:
+            run["pending"] = [k for k in run["pending"] if k not in run["results"] and k not in run["skipped"]]
+            state = await _council_flow(run)
+            if not (state == "waiting" and _council_ready(run)):
+                break
+    except Exception as exc:  # noqa: BLE001 — record, never lose the run
+        run["events"].append({"type": "error", "message": f"Прогон упал: {exc}"[:400]})
+        run["events"].append({"type": "done", "ok": False, "retry": True})
+        state = "done"
+    # No await from the readiness check to LIVE.pop: a paste arriving now
+    # either lands in the live object above or finds the run parked on disk.
+    run["status"] = "waiting" if state == "waiting" else "done"
+    if run["status"] == "done" and run["ok"] is None:
+        run["ok"] = False
+    runs.save(run)
+    LIVE.pop(run["id"], None)
+
+
+@app.post("/api/council")
+async def api_council(req: Request):
+    body = await req.json()
+    question = (body.get("question") or "").strip()
+    mode = body.get("mode")
+    if mode not in council.MODES or not question:
+        return JSONResponse({"error": "Нужны режим и вопрос."}, status_code=400)
+    run = runs.new(question, "", "")
+    run.update(mode=mode, web=bool(body.get("web", True)),
+               judge="gemini" if mode == "duel" and body.get("judge") == "gemini" else "deepseek",
+               attachments=_clean_attachments(body.get("attachments")),
+               results={}, skipped=[], requested=[], pending=[])
+    return await _start(run)
+
+
+@app.post("/api/runs/{run_id}/manual")
+async def api_manual(run_id: str, req: Request) -> JSONResponse:
+    """A manual paste (or skip / «учесть критику» / «продолжить») for a
+    duel/council run. Continues the run unless it is still running."""
+    body = await req.json()
+    run = LIVE.get(run_id) or runs.load(run_id)
+    if run is None or run.get("mode") not in council.MODES:
+        return JSONResponse({"error": "Прогон не найден."}, status_code=404)
+    live = run_id in LIVE
+    key, text = body.get("key") or "", (body.get("text") or "").strip()
+    if body.get("retry"):
+        if live or run["status"] == "waiting":
+            return JSONResponse({"error": "Прогон не остановлен."}, status_code=409)
+        for stage in [s for s, e in run["results"].items() if e.get("error")]:
+            del run["results"][stage]
+        run["events"].append({"type": "info", "message": "Продолжаю с упавшего шага…"})
+    elif key not in run["pending"]:
+        return JSONResponse({"error": "Этот шаг сейчас не ждёт ввода."}, status_code=409)
+    elif key == "apply":
+        if body.get("skip"):
+            run["skipped"].append(key)
+            run["events"].append({"type": "skipped", "key": key})
+        else:
+            run["apply_go"] = True
+    elif body.get("skip"):
+        if key == "judge":
+            return JSONResponse({"error": "Без судьи дуэль не закончить."}, status_code=400)
+        run["skipped"].append(key)
+        run["events"].append({"type": "skipped", "key": key})
+    else:
+        if not text:
+            return JSONResponse({"error": "Вставь ответ."}, status_code=400)
+        if key == "judge":
+            labels = {run["labels"][k] for k in council.AUTHORS["duel"]}
+            if not council.parse_winner(text, labels):
+                return JSONResponse({"error": "В ответе Gemini нет последней строки WINNER: A или WINNER: B."},
+                                    status_code=400)
+        who = "gemini" if key == "judge" else "grok" if key == "critic" else key.split(":", 1)[1]
+        event = _manual_event(key, who, text)
+        run["results"][key] = event
+        run["events"].append(event)
+    if live:
+        runs.save(run)
+        return JSONResponse({"started": False})
+    if run["status"] == "done" and not body.get("retry"):
+        return JSONResponse({"error": "Прогон уже завершён."}, status_code=409)
+    run["status"] = "running"
+    if not run.get("ok"):
+        run["ok"] = None
+    LIVE[run_id] = run
+    runs.save(run)
+    task = asyncio.get_running_loop().create_task(_execute_council(run))
+    TASKS.add(task)
+    task.add_done_callback(TASKS.discard)
+    return JSONResponse({"started": True})
+
+
 PIPELINE_CHAT = """\
 You are {name}. A research pipeline (Grok research → Claude analysis →
 GPT/Codex review → Claude final) has finished on the topic below. The user now
@@ -954,11 +1250,14 @@ async def _chat_reply(run: dict, m: q.Model, key: str) -> None:
             run["chain_evidence"] = await asyncio.to_thread(blockchain_evidence, f"{question}\n{research}")
         history = "\n\n".join(f"--- {'USER' if c['role'] == 'user' else c.get('name', 'ASSISTANT')} ---\n{c['text']}"
                               for c in run["chat"] if c["role"] in ("user", "assistant"))
-        prompt = PIPELINE_CHAT.format(
-            name=m.name, today=time.strftime("%d.%m.%Y"), question=question, research=research,
-            extracts=stages.get("reader") or "(none)", chain_evidence=run["chain_evidence"],
-            draft=stages.get("draft", ""), review=stages.get("review", ""), final=stages.get("final", ""),
-            history=history)
+        if run.get("mode") in council.MODES:
+            prompt = _council_chat_prompt(run, m, question, history)
+        else:
+            prompt = PIPELINE_CHAT.format(
+                name=m.name, today=time.strftime("%d.%m.%Y"), question=question, research=research,
+                extracts=stages.get("reader") or "(none)", chain_evidence=run["chain_evidence"],
+                draft=stages.get("draft", ""), review=stages.get("review", ""), final=stages.get("final", ""),
+                history=history)
         result = await asyncio.to_thread(q.run_model, m, prompt, True)
         event = _stage_event("chat", result)
         run["chat"].append({"role": "error" if result.error else "assistant", "model": key,
@@ -974,6 +1273,26 @@ async def _chat_reply(run: dict, m: q.Model, key: str) -> None:
         run["chat_pending"] = False
         await asyncio.to_thread(runs.save, run)
         CHATTING.pop(run["id"], None)
+
+
+def _council_chat_prompt(run: dict, m: q.Model, question: str, history: str) -> str:
+    """Duel/council material for the conversation: authors are revealed now."""
+    res = run.get("results", {})
+    parts = []
+    for k in council.AUTHORS[run["mode"]]:
+        if _ok(res, f"author:{k}"):
+            parts.append(f"=== ANSWER BY {council.NAMES[k].upper()} ===\n{res[f'author:{k}']['answer']}")
+    if run.get("ranking"):
+        parts.append("=== BLIND RANKING (best first) ===\n" +
+                     "\n".join(f"{r['place']}. {r['who']}" for r in run["ranking"]))
+    for stage, title in (("judge", "JUDGE VERDICT"), ("synth", "FINAL ANSWER SHOWN TO THE USER"),
+                         ("critic", "GROK CRITIQUE"), ("apply", "FINAL ANSWER AFTER CRITIQUE")):
+        if _ok(res, stage):
+            parts.append(f"=== {title} ===\n{res[stage]['answer']}")
+    return council.COUNCIL_CHAT.format(
+        name=m.name, mode="«Дуэль»" if run["mode"] == "duel" else "«Совет»",
+        critic_note=" and a Grok critique" if _ok(res, "critic") else "",
+        today=time.strftime("%d.%m.%Y"), question=question, material="\n\n".join(parts), history=history)
 
 
 @app.get("/api/runs/{run_id}/chat")
@@ -999,7 +1318,7 @@ async def api_chat(run_id: str, req: Request) -> JSONResponse:
     run = _stored_run(run_id)
     if run is None:
         return JSONResponse({"error": "Прогон не найден."}, status_code=404)
-    if run["status"] == "running" or not any(e.get("stage") == "final" and e.get("type") == "stage"
+    if run["status"] == "running" or not any(e.get("stage") in ("final", "synth") and e.get("type") == "stage"
                                              and not e.get("error") for e in run["events"]):
         return JSONResponse({"error": "Беседа доступна после готового финала."}, status_code=400)
     m = next((m for m in q.load_config().panel if m.enabled and m.provider == CHAT_MODELS[key]), None)
@@ -1032,7 +1351,8 @@ async def api_run(run_id: str) -> JSONResponse:
     if run is None:
         return JSONResponse({"error": "Прогон не найден."}, status_code=404)
     return JSONResponse({**{k: run[k] for k in ("id", "created", "question", "research", "revision", "status")},
-                         "attachments": run.get("attachments", [])})
+                         "attachments": run.get("attachments", []), "mode": run.get("mode", "pipeline"),
+                         "web": run.get("web", True), "judge": run.get("judge", "deepseek")})
 
 
 @app.get("/api/runs/{run_id}/cost")
@@ -1175,6 +1495,20 @@ INDEX_HTML = r"""<!doctype html>
   .banner.err { color:var(--err); border-color:var(--err); }
 
   .chips { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0 0; }
+  [hidden] { display:none !important; }
+  .modes { display:flex; gap:6px; flex-wrap:wrap; margin:0 0 12px; }
+  .mode-btn { background:var(--inbg); color:var(--txt); border:1px solid var(--line); font-weight:600; padding:8px 14px; }
+  .mode-btn.active { background:var(--acc); color:var(--btntxt); border-color:var(--acc); }
+  .manual-body { padding:0 16px 16px; font-size:14px; }
+  .mtable { width:100%; border-collapse:collapse; font-size:13px; margin:4px 0 12px; }
+  .mtable th, .mtable td { border:1px solid var(--line); padding:6px 8px; vertical-align:top; text-align:left; }
+  .mtable th { background:var(--inbg); }
+  .mtable td:first-child { color:var(--dim); white-space:nowrap; }
+  .table-wrap { overflow-x:auto; }
+  .manual-card { border-color:var(--acc); }
+  .paste-item { margin-top:12px; padding-top:12px; border-top:1px solid var(--line); }
+  .paste-item:first-of-type { border-top:0; padding-top:0; }
+  .paste-item textarea { margin-top:8px; min-height:110px; }
   .chip { background:var(--inbg); color:var(--dim); border:1px solid var(--line); border-radius:16px;
           padding:4px 11px; font-size:13px; font-weight:500; }
   .chip:hover:not(:disabled) { color:var(--txt); border-color:var(--acc); filter:none; }
@@ -1192,14 +1526,50 @@ INDEX_HTML = r"""<!doctype html>
 </script></head>
 <body>
 <header>
-  <div style="flex:1"><h1>quorum</h1> <span>research → verification → review → final</span></div>
+  <div style="flex:1"><h1>quorum</h1> <span>фактчек · дуэль · совет</span></div>
   <button id="home" class="theme" title="Reset page">⌂</button>
   <button id="theme" class="theme" title="Toggle light / dark theme">🌙</button>
 </header>
 <main>
+  <details class="card" id="manual">
+    <summary><span class="name">📖 Мануал: три режима Quorum</span><span class="meta foot">какой когда брать</span></summary>
+    <div class="manual-body">
+      <div class="table-wrap"><table class="mtable">
+        <tr><th></th><th>🔎 Фактчек</th><th>⚔ Дуэль</th><th>🏛 Совет</th></tr>
+        <tr><td>Для чего</td><td>Проверить твит, новость, проект, «правда ли…»: что правда и что делать</td><td>Обычное решение или текст: быстро получить лучшую из двух версий</td><td>Большое решение: деньги, архитектура, долгие последствия</td></tr>
+        <tr><td>Кто пишет</td><td>Цепочка: Grok ищет → Claude анализ → Codex проверка → Claude финал</td><td>Claude и Codex — параллельно, не видя друг друга</td><td>Claude, Codex, DeepSeek + Grok и Gemini (вручную) — каждый свой ответ</td></tr>
+        <tr><td>Кто выбирает</td><td>Нет выбора — последовательная проверка</td><td>Судья DeepSeek (авто) или Gemini (вручную): ответы под метками A/B в случайном порядке</td><td>Claude, Codex, DeepSeek оценивают чужие ответы вслепую, свой — никогда; итог по сумме мест (Borda)</td></tr>
+        <tr><td>Финал</td><td>Claude, до 220 слов</td><td>Проигравший автор: основа — победитель + лучшее из своего</td><td>Лучшая автомодель, не писавшая ответ-победитель</td></tr>
+        <tr><td>Критик</td><td>—</td><td colspan="2">Grok вручную, по желанию: разносит финал → кнопка «Учесть критику» переписывает его</td></tr>
+        <tr><td>Ручных вставок</td><td>1 — Grok, до запуска</td><td>0–2 — Gemini-судья, Grok-критик</td><td>2–3 — Grok и Gemini как авторы, Grok-критик</td></tr>
+        <tr><td>Время</td><td>≈3–4 мин (медиана прогонов)</td><td>≈3–5 мин (оценка)</td><td>≈6–10 мин + твои вставки (оценка)</td></tr>
+        <tr><td>Деньги</td><td>Claude/Codex — подписка</td><td>подписка + DeepSeek-судья ≈ $0.01</td><td>подписка + DeepSeek ≈ $0.02–0.05</td></tr>
+      </table></div>
+      <strong>Как работать с ручными вставками (Grok, Gemini)</strong>
+      <ol style="margin:6px 0 10px;padding-left:20px">
+        <li>Выбери режим, опиши задачу, запусти.</li>
+        <li>Появится карточка ✋: «Скопировать промпт» → вставь в чат Grok или Gemini → скопируй ответ целиком → «Отправить». Пока ты копируешь, Claude, Codex и DeepSeek уже работают.</li>
+        <li>Не хочешь ждать кого-то из ручных авторов — «Пропустить»: сравнение пойдёт по оставшимся ответам.</li>
+        <li>Gemini-судья обязан закончить ответ строкой WINNER: A или WINNER: B — промпт это требует, без неё вставка не примется.</li>
+        <li>Прогон ждёт тебя сколько угодно (⏸ в истории): страницу можно закрыть и вернуться.</li>
+        <li>Упал шаг — «↻ Продолжить»: повторится только упавший шаг, готовые не пересчитываются.</li>
+        <li>После финала — беседа с Claude или Codex по всему материалу; в «Дуэли» и «Совете» авторы в ней уже раскрыты.</li>
+      </ol>
+      <div class="foot">Слепота: модели видят ответы только под буквами в случайном порядке; кто есть кто — видно лишь в таблице итога. Время для «Дуэли» и «Совета» — оценка по замерам этапов фактчека (Claude с вебом ≈1,5 мин, Codex ≈1 мин).</div>
+    </div>
+  </details>
   <div class="card">
-    <h2 style="margin:0 0 5px;font-size:18px">Research pipeline</h2>
-    <div class="foot" style="margin:0 0 16px">Grok сам ищет свежие данные в вебе и X через xAI API, затем Claude и GPT проверяют и решают. Ручная вставка ответа Grok осталась как запасной режим.</div>
+    <div class="modes" id="modeSwitch">
+      <button type="button" class="mode-btn" data-mode="pipeline">🔎 Фактчек</button>
+      <button type="button" class="mode-btn" data-mode="duel">⚔ Дуэль</button>
+      <button type="button" class="mode-btn" data-mode="council">🏛 Совет</button>
+    </div>
+    <div class="foot" id="modeDesc" style="margin:0 0 12px"></div>
+    <div id="councilOpts" class="row" style="margin:0 0 12px" hidden>
+      <label id="judgeBox" style="margin:0">Судья
+        <select id="duelJudge"><option value="deepseek">DeepSeek — автоматически</option><option value="gemini">Gemini — вручную</option></select></label>
+      <label style="margin:0"><input type="checkbox" id="councilWeb" checked> Claude и Codex ищут в вебе (дольше, точнее)</label>
+    </div>
     <div class="row" style="margin:0 0 12px"><label for="runHistory" style="margin:0">История прогонов</label>
       <select id="runHistory" style="flex:1;min-width:0"></select></div>
     <details class="pipeline-models" id="modelsPanel">
@@ -1291,7 +1661,7 @@ INDEX_HTML = r"""<!doctype html>
     <textarea id="grokNotes" style="min-height:180px" placeholder="Вставь сюда результат поиска Grok. Сохраняй ссылки, даты и цитаты — они пойдут автору и фактчекеру."></textarea>
     </div>
     <div class="row" style="margin-top:14px">
-      <span class="foot">Grok ищет → Claude проверяет источники → GPT/Codex делает ревью → Claude готовит финал</span>
+      <span class="foot" id="flowNote">Grok ищет → Claude проверяет источники → GPT/Codex делает ревью → Claude готовит финал</span>
       <div style="margin-left:auto"><button id="runPipeline">Run pipeline</button></div>
     </div>
     <div class="foot" id="pipelineStatus"></div>
@@ -1354,8 +1724,29 @@ function fmtModel(m){
 }
 let GROK_MODE='manual';
 function applyGrokMode(){
-  document.getElementById('grokManualBox').hidden=GROK_MODE==='api';
-  document.getElementById('grokApiNote').hidden=GROK_MODE!=='api';
+  const pipe=MODE==='pipeline';
+  document.getElementById('grokManualBox').hidden=!pipe || GROK_MODE==='api';
+  document.getElementById('grokApiNote').hidden=!pipe || GROK_MODE!=='api';
+}
+const MODES={
+  pipeline:{desc:'Фактчек: Grok собирает факты (веб + X), Claude пишет анализ, GPT/Codex проверяет, Claude выдаёт короткое решение.',
+    flow:'Grok ищет → Claude проверяет источники → GPT/Codex делает ревью → Claude готовит финал', btn:'Run pipeline'},
+  duel:{desc:'Дуэль: Claude и Codex пишут вслепую, судья выбирает победителя, проигравший собирает финал. Grok-критик — по желанию.',
+    flow:'Claude ‖ Codex → судья → финал → Grok-критик (по желанию)', btn:'⚔ Запустить дуэль'},
+  council:{desc:'Совет: пять авторов (Grok и Gemini — вручную), слепая взаимная оценка без самооценки, финал пишет лучшая модель, не писавшая ответ-победитель.',
+    flow:'Claude ‖ Codex ‖ DeepSeek ‖ Grok ‖ Gemini → слепая оценка → финал → Grok-критик (по желанию)', btn:'🏛 Созвать совет'},
+};
+let MODE='pipeline';
+function setMode(m){
+  MODE=MODES[m] ? m : 'pipeline';
+  try{ localStorage.setItem('mode',MODE); }catch(e){}
+  document.querySelectorAll('.mode-btn').forEach(b=>b.classList.toggle('active',b.dataset.mode===MODE));
+  document.getElementById('modeDesc').textContent=MODES[MODE].desc;
+  document.getElementById('flowNote').textContent=MODES[MODE].flow;
+  document.getElementById('runPipeline').textContent=MODES[MODE].btn;
+  document.getElementById('councilOpts').hidden=MODE==='pipeline';
+  document.getElementById('judgeBox').hidden=MODE!=='duel';
+  applyGrokMode();
 }
 async function loadPipelineModels(){
   const box=document.getElementById('pipelineModels');
@@ -1437,9 +1828,75 @@ const PIPE_LABEL={research:'Grok — исследование (веб + X)',read
   review:'GPT/Codex — внутренняя проверка',final:'Claude — решение для тебя'};
 // Cards are numbered in the order stages actually run (the reader stage only
 // exists when Claude works through the API).
+const WHO={claude:'Claude',codex:'GPT/Codex',deepseek:'DeepSeek',grok:'Grok',gemini:'Gemini'};
+function councilLabel(stage){
+  const [kind,who]=stage.split(':');
+  if(kind==='author') return (WHO[who]||who)+' — ответ вслепую';
+  if(kind==='review') return (WHO[who]||who)+' — слепая оценка чужих ответов';
+  return {judge:'Судья — выбор победителя',synth:'Финальная версия',critic:'Grok — критик',
+    apply:'Финал с учётом критики'}[stage]||stage;
+}
+const FINAL_STAGES=['final','synth','apply'];
 function stageLabel(cards,stage){
   const n=Object.keys(cards).indexOf(stage)+1 || Object.keys(cards).length+1;
-  return n+'. '+(PIPE_LABEL[stage]||stage);
+  return n+'. '+(PIPE_LABEL[stage]||councilLabel(stage));
+}
+function copyText(text){
+  if(navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
+  const ta=document.createElement('textarea'); ta.value=text;
+  ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta);
+  ta.select(); document.execCommand('copy'); ta.remove(); return Promise.resolve();
+}
+// One manual step (paste / skip / confirm) of a duel or council run.
+function manualItem(it,getRunId){
+  const box=document.createElement('div'); box.className='paste-item'; box.dataset.who=it.who;
+  const skip=it.skip ? '<button type="button" class="ghost jbtn m-skip">'+(it.kind==='confirm'?'Не нужно':'Пропустить')+'</button>' : '';
+  if(it.kind==='confirm'){
+    box.innerHTML=`<div><strong>${esc(it.who)}</strong> перепишет финал, приняв только верные замечания критика.</div>`+
+      `<div class="row" style="margin-top:8px"><button type="button" class="m-go">✍ Учесть критику</button>${skip}<span class="foot m-st"></span></div>`;
+  } else {
+    box.innerHTML=`<div><strong>${esc(it.who)}</strong> — ${esc(it.title)}</div>`+
+      `<div class="foot" style="margin:2px 0 8px">Скопируй промпт → вставь в чат ${esc(it.who)} → дождись ответа → вставь его сюда целиком.</div>`+
+      `<div class="row"><button type="button" class="ghost jbtn m-copy">📋 Скопировать промпт для ${esc(it.who)}</button>${skip}</div>`+
+      `<textarea class="m-text" placeholder="Полный ответ ${esc(it.who)}…"></textarea>`+
+      `<div class="row" style="margin-top:8px"><button type="button" class="m-send">Отправить ответ ${esc(it.who)}</button><span class="foot m-st"></span></div>`;
+    box.querySelector('.m-copy').addEventListener('click',async ev=>{
+      await copyText(it.prompt); const b=ev.target, old=b.textContent;
+      b.textContent='✓ Промпт скопирован'; setTimeout(()=>{ b.textContent=old; },1800);
+    });
+  }
+  async function send(payload){
+    const st=box.querySelector('.m-st'); st.textContent='Отправляю…';
+    const r=await fetch('/api/runs/'+encodeURIComponent(getRunId())+'/manual',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({key:it.key},payload))});
+    const d=await r.json();
+    if(!r.ok){ st.textContent=d.error||'Не принято.'; return; }
+    st.textContent='✓ Принято';
+    if(d.started) await openRun(getRunId());
+  }
+  const sendBtn=box.querySelector('.m-send');
+  if(sendBtn) sendBtn.addEventListener('click',()=>{
+    const text=box.querySelector('.m-text').value.trim();
+    if(!text){ box.querySelector('.m-st').textContent='Вставь ответ.'; return; }
+    send({text:text});
+  });
+  const go=box.querySelector('.m-go'); if(go) go.addEventListener('click',()=>send({go:true}));
+  const sk=box.querySelector('.m-skip'); if(sk) sk.addEventListener('click',()=>send({skip:true}));
+  return box;
+}
+function closeManual(pending,key,text){
+  const box=pending[key]; if(!box) return;
+  box.innerHTML=`<div class="foot">${text.startsWith('—') ? esc(box.dataset.who)+' '+text : text}</div>`; delete pending[key];
+}
+function rankingCard(o){
+  const council=o.mode==='council';
+  const head=council ? '<tr><th>Место</th><th>Ответ</th><th>Автор</th><th>Borda (0–1)</th><th>Ср. балл</th><th>Оценок</th></tr>'
+    : '<tr><th>Место</th><th>Ответ</th><th>Автор</th></tr>';
+  const rows=o.rows.map(r=>council
+    ? `<tr><td>${r.place}</td><td>${esc(r.label)}</td><td>${esc(r.who)}</td><td>${r.borda}</td><td>${r.score==null?'—':r.score}</td><td>${r.votes}</td></tr>`
+    : `<tr><td>${r.place}</td><td>${esc(r.label)}</td><td>${esc(r.who)}</td></tr>`).join('');
+  return card(`<h3>🏆 ${council?'Итог слепой взаимной оценки':'Вердикт судьи'}</h3><div class="table-wrap"><table class="mtable">${head}${rows}</table></div>`+
+    `<div class="foot">${council?'Каждый оценщик видел ответы под буквами и без своего; баллы нормированы, т.к. число оценок у ответов разное.':'Судья видел ответы только под буквами A/B.'}</div>`);
 }
 // Clickable starters for field 1; the first [placeholder] gets selected so
 // typing replaces it straight away.
@@ -1532,7 +1989,8 @@ async function loadRunHistory(selected){
   try{
     const data=await (await fetch('/api/runs')).json();
     sel.innerHTML='<option value="">— новый прогон —</option>'+data.runs.map(r=>{
-      const mark=(r.status==='running'?'⏳ ':r.ok?'✓ ':'✗ ')+(r.parent?'✎ ':'')+(r.chat?'💬 ':'');
+      const mark=(r.status==='running'?'⏳ ':r.ok?'✓ ':r.status==='waiting'?'⏸ ':'✗ ')+
+        (r.mode==='duel'?'⚔ ':r.mode==='council'?'🏛 ':'')+(r.parent?'✎ ':'')+(r.chat?'💬 ':'');
       return `<option value="${esc(r.id)}">${mark}${esc(r.title.length>80 ? r.title.slice(0,80).trim()+'…' : r.title)} · ${esc(r.created)}</option>`;
     }).join('');
     sel.value=selected||'';
@@ -1543,7 +2001,7 @@ async function followRun(resp){
   const out=document.getElementById('pipelineOut');
   const status=document.getElementById('pipelineStatus');
   const btn=document.getElementById('runPipeline');
-  const cards={}; let runId='';
+  const cards={}, pending={}; let runId='';
   out.innerHTML=''; status.className='foot';
   btn.disabled=true;
   try{
@@ -1560,19 +2018,30 @@ async function followRun(resp){
           runId=o.id; rememberRun(o.id); loadRunHistory(o.id);
         } else if(o.type==='revision'){
           out.appendChild(card(`<div class="foot">✎ Доработка прогона от ${esc(o.parent_created)}</div><div>${esc(o.text)}</div>`));
+        } else if(o.type==='manual'){
+          const d=card(`<h3>${o.optional?'✋ По желанию':'✋ Нужна твоя вставка'}</h3>`,'manual-card');
+          o.items.forEach(it=>{ const b=manualItem(it,()=>runId); pending[it.key]=b; d.appendChild(b); });
+          out.appendChild(d);
+        } else if(o.type==='skipped'){
+          closeManual(pending,o.key,'— пропущено');
+        } else if(o.type==='ranking'){
+          out.appendChild(rankingCard(o));
         } else if(o.type==='stage_start'){
+          closeManual(pending,o.stage,'✓ запущено');
           status.className='foot'; status.textContent='Сейчас работает: '+stageLabel(cards,o.stage)+'…';
-          const d=card(`<h3>${esc(stageLabel(cards,o.stage))}</h3><pre class="spin">${esc(o.name)} is working<span class="dots"></span></pre>`,o.stage==='final'?'judge':'');
+          const d=card(`<h3>${esc(stageLabel(cards,o.stage))}</h3><pre class="spin">${esc(o.name)} is working<span class="dots"></span></pre>`,FINAL_STAGES.includes(o.stage)?'judge':'');
           cards[o.stage]=d; out.appendChild(d);
         } else if(o.type==='stage'){
-          const d=cards[o.stage] || card('',o.stage==='final'?'judge':'');
+          closeManual(pending,o.stage,'✓ '+esc(o.name)+': ответ получен');
+          const isFinal=FINAL_STAGES.includes(o.stage);
+          const d=cards[o.stage] || card('',isFinal?'judge':'');
           if(!cards[o.stage]){ cards[o.stage]=d; out.appendChild(d); }
           const cost=fmtCost(o.cost_usd);
-          const meta=o.reused_from ? `${esc(o.provider)}/${esc(o.model)} · взято из прогона от ${esc(o.reused_from)}, повторно не оплачивалось`
+          const meta=o.manual ? `${esc(o.name)} · вставлено вручную` : o.reused_from ? `${esc(o.provider)}/${esc(o.model)} · взято из прогона от ${esc(o.reused_from)}, повторно не оплачивалось`
             : `${esc(o.provider)}/${esc(o.model)}${servedNote(o)} · ${o.seconds}s${fmtTok(o)}${cost?' · '+cost:''}${fmtSearches(o.searches)}`;
           const title=`${esc(stageLabel(cards,o.stage))} <span class="meta">${meta}</span>`;
           const body=o.error ? `<pre class="err">ERROR: ${esc(o.error)}</pre>` : `<div class="md">${mdToHtml(o.answer)}</div>`;
-          if(!o.error && o.stage!=='final'){
+          if(!o.error && !isFinal){
             d.innerHTML=`<details class="pipeline-detail"><summary><h3>${title}</h3><span class="foot">Рабочий материал — раскрыть при необходимости</span></summary>${body}</details>`;
           } else {
             d.innerHTML=`<h3>${title}</h3>${body}`;
@@ -1580,6 +2049,10 @@ async function followRun(resp){
           if(!o.error){
             addCopyActions(d,o.answer,o.stage);
             if(o.stage==='final'){ d.appendChild(reviseBox(()=>runId)); d.appendChild(chatBox(()=>runId)); }
+            if(o.stage==='synth' || o.stage==='apply'){
+              out.querySelectorAll('.chat-box').forEach(c=>c.remove());
+              d.appendChild(chatBox(()=>runId));
+            }
           }
         } else if(o.type==='error'){
           status.innerHTML=`<span class="banner err">✗ ${esc(o.message)}</span>`;
@@ -1589,8 +2062,24 @@ async function followRun(resp){
           status.innerHTML=o.ok ? '<span class="banner ok">✓ Final is ready for approval</span>'
             : '<span class="banner err">✗ Pipeline stopped — see the failed stage.</span>';
           if(typeof o.total_cost_usd==='number') renderCost(runId);
+          if(o.retry){
+            const b=document.createElement('button'); b.type='button'; b.className='ghost jbtn'; b.style.marginLeft='8px';
+            b.textContent='↻ Продолжить с упавшего шага';
+            b.addEventListener('click',async()=>{
+              const r=await fetch('/api/runs/'+encodeURIComponent(runId)+'/manual',{method:'POST',
+                headers:{'Content-Type':'application/json'},body:JSON.stringify({retry:true})});
+              if(r.ok) await openRun(runId); else status.textContent=(await r.json()).error||'Не удалось продолжить.';
+            });
+            status.appendChild(b);
+          }
         }
       }
+    }
+    if(Object.keys(pending).length){
+      const note=document.createElement('div'); note.className='foot';
+      note.textContent='⏸ Прогон ждёт тебя — карточка ✋ ниже. Страницу можно закрыть: прогон сохранён в истории.';
+      if(status.textContent.startsWith('Сейчас работает')) status.textContent='';
+      status.appendChild(note);
     }
   }catch(e){ status.innerHTML=`<span class="banner err">✗ ${esc(String(e.message||e))}</span>`; }
   finally{ btn.disabled=false; loadRunHistory(document.getElementById('runHistory').value); }
@@ -1698,11 +2187,30 @@ async function openRun(id){
   if(!r.ok){ rememberRun(''); return; }
   const run=await r.json();
   pipelineInputs(run); rememberRun(id);
+  setMode(run.mode||'pipeline');
+  if(run.mode && run.mode!=='pipeline'){
+    document.getElementById('councilWeb').checked=run.web!==false;
+    document.getElementById('duelJudge').value=run.judge||'deepseek';
+  }
   if(run.status==='running') status.textContent='Прогон ещё идёт — показываю его вживую…';
   await followRun(await fetch('/api/runs/'+encodeURIComponent(id)+'/stream'));
 }
+async function runCouncil(question){
+  const status=document.getElementById('pipelineStatus');
+  status.className='foot';
+  status.textContent=MODE==='duel' ? 'Запускаю дуэль: Claude ‖ Codex…' : 'Созываю совет: Claude ‖ Codex ‖ DeepSeek, Grok и Gemini — вручную…';
+  const resp=fetch('/api/council',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({mode:MODE,question:question,attachments:PIPE_FILES,
+      judge:document.getElementById('duelJudge').value,web:document.getElementById('councilWeb').checked})});
+  try{ await followRun(await resp); }
+  catch(e){ status.innerHTML=`<span class="banner err">✗ ${esc(String(e.message||e))}</span>`; }
+}
 async function runPipeline(){
   const question=document.getElementById('pipeQ').value.trim();
+  if(MODE!=='pipeline'){
+    if(!question){ document.getElementById('pipelineStatus').textContent='Опиши задачу или вопрос.'; return; }
+    return runCouncil(question);
+  }
   const research=GROK_MODE==='api' ? '' : document.getElementById('grokNotes').value.trim();
   const status=document.getElementById('pipelineStatus');
   status.className='foot';
@@ -1785,6 +2293,15 @@ function addCopyActions(cardEl, text, slug){
 }
 
 document.getElementById('runPipeline').addEventListener('click',runPipeline);
+document.querySelectorAll('.mode-btn').forEach(b=>b.addEventListener('click',()=>setMode(b.dataset.mode)));
+(function(){
+  let saved='pipeline', closed=false;
+  try{ saved=localStorage.getItem('mode')||'pipeline'; closed=localStorage.getItem('manualClosed')==='1'; }catch(e){}
+  setMode(saved);
+  const man=document.getElementById('manual');
+  man.open=!closed;
+  man.addEventListener('toggle',()=>{ try{ localStorage.setItem('manualClosed',man.open?'0':'1'); }catch(e){} });
+})();
 document.getElementById('copyGrokPrompt').addEventListener('click',copyGrokPrompt);
 document.getElementById('pipeAttach').addEventListener('click',()=>document.getElementById('pipeFile').click());
 document.getElementById('pipeFile').addEventListener('change',onPipeFiles);

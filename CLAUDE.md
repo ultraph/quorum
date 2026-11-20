@@ -41,6 +41,14 @@ Grok (xAI API) → Claude: полный анализ → GPT/Codex: ревью �
    Промежуточные этапы в UI свёрнуты. В промпте Grok раздел называется
    «Найденные факты» (это пересказ, не проверка); ключевые цифры — из двух источников.
 
+**Режимы «Дуэль» и «Совет»** (с 20.11.2026, `docs/MODES.md`) — альтернатива
+фактчеку, выбирается переключателем вверху страницы; над ним — блок «📖 Мануал»
+с описанием всех трёх режимов (держать актуальным при изменениях). Слепая
+генерация несколькими моделями → слепое судейство/взаимная оценка без
+самооценки → финал → Grok-критик по желанию. **Grok и Gemini в этих режимах —
+только ручная вставка** (решение владельца); Claude/Codex/DeepSeek — авто.
+Прогон возобновляемый: статус `waiting` + `POST /api/runs/{id}/manual`.
+
 Для крипто-тем есть серверный шаг `blockchain_evidence()`: полные EVM-адреса из
 текста → Blockscout PRO API (`/<chain id>/api/v2`) + реестр токенов Robinhood +
 ERC-20 `balanceOf` через RPC. Результат передаётся моделям как независимое
@@ -64,8 +72,14 @@ Polygon — 402), другие сети НЕ перебираются: совп�
   оценка API-цены (`api_price_estimate`), CLI-интерфейс и мастер `--setup`.
 - `webapp.py` — FastAPI + весь фронтенд в строке `INDEX_HTML` (HTML/CSS/JS).
   Эндпоинты: `/api/models`, `/api/pipeline` (SSE),
-  `/api/connections/{claude,gpt,grok}`, `/api/grok_prompt`, `/api/runs[/{id}[/stream|/revise|/chat|/cost]]`. Промпты этапов —
+  `/api/connections/{claude,gpt,grok}`, `/api/grok_prompt`, `/api/council`,
+  `/api/runs[/{id}[/stream|/revise|/chat|/cost|/manual]]`. Промпты этапов —
   `GROK_RESEARCH`, `PIPELINE_*`.
+- `council.py` — «Дуэль»/«Совет»: промпты (`AUTHOR`, `DUEL_JUDGE`, `PEER_REVIEW`,
+  `SYNTH`, `CRITIC`, `APPLY`, `COUNCIL_CHAT`), слепые метки, разбор
+  `WINNER:`/`RANKING:`/`SCORES:`, агрегация Borda. Оркестрация (`_council_flow`,
+  `_execute_council`, `/api/council`, `/api/runs/{id}/manual`) — в `webapp.py`.
+  Тесты: `python -m unittest test_council -v` (фейковые модели, без вызовов).
 - `connections.py` — переключение «подписка (CLI) ↔ API-ключ» (у Grok —
   «API ↔ вручную») из веба;
   оверрайды в `connections.local.json` рядом с конфигом (вне Git).
@@ -93,7 +107,8 @@ Polygon — 402), другие сети НЕ перебираются: совп�
 
 ## Договорённости с владельцем (не нарушать)
 
-- Основной контур — Grok (API) + Claude + GPT. DeepSeek — резерв, по умолчанию выключен.
+- Основной контур — Grok (API) + Claude + GPT. DeepSeek — резерв в фактчеке;
+  в «Дуэли» (судья по умолчанию) и «Совете» (автор + оценщик) — штатный участник.
   Kimi не используется. Модели: Grok 4.7 (`grok-4.7`), Claude Opus 5.5 (`claude-opus-5-5`) и
   GPT-6.1 Sol, закреплены явно.
 - Claude/Codex проверяют **что** написано, а не **когда**: не открывать и не

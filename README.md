@@ -101,6 +101,21 @@ Prefer a browser over the terminal? quorum ships a local web UI: tick the panel
 models, pick a judge, ask, and watch each answer stream in live with the
 judge's verdict synthesized on top.
 
+### Blind modes: Duel and Council
+
+Besides the research pipeline, the web UI has two blind multi-model modes
+(details: `docs/MODES.md`; a manual of all three modes sits at the top of the page):
+
+- **Duel** — Claude and GPT/Codex answer independently; a judge (DeepSeek API,
+  or Gemini pasted by hand) picks the winner from blind A/B labels; the losing
+  author merges the winner with its own best points.
+- **Council** — Claude, GPT/Codex, DeepSeek, plus Grok and Gemini pasted by hand,
+  each answer; the automatic models grade the others blind (never their own),
+  rankings are aggregated (normalized Borda), and the best-placed model that did
+  not write the winner writes the final.
+- Optionally Grok (pasted by hand) attacks the final, and its author can apply
+  the valid points. Runs pause for manual pastes and resume where they stopped.
+
 ### Research pipeline
 
 The web UI has separate **Подключение Claude: подписка / API** and

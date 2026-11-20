@@ -136,6 +136,8 @@ _API_PRICE_ESTIMATES: dict[tuple[str, str], tuple[str, float, float]] = {
     ("openai", "gpt-6.1-sol"): ("GPT-6.1 Sol", 2.00, 10.00),
     ("xai", "grok-4.7"): ("Grok 4.7", 2.00, 6.00),
     ("xai", "grok-4.3"): ("Grok 4.3", 1.25, 2.50),
+    # Peak rate (off-peak is half): an upper estimate, KB api-price-compare 20.11.2026.
+    ("deepseek", "deepseek-v4-pro"): ("DeepSeek V4 Pro", 1.32, 3.96),
 }
 
 
