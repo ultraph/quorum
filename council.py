@@ -273,8 +273,12 @@ def synthesizer(winner: str, order, mode: str = "duel") -> str:
     return next(k for k in AUTO if k != winner)
 
 
-def author_prompt(question: str, today: str, key: str, web: bool) -> str:
-    if key in MANUAL:
+def author_prompt(question: str, today: str, key: str, web: bool, manual: bool | None = None) -> str:
+    """`manual`: pasted by hand from a chat (always may browse). Defaults to
+    the participant's usual way (Grok, Gemini — manual)."""
+    if manual is None:
+        manual = key in MANUAL
+    if manual:
         rule = WEB_MANUAL
     else:
         rule = WEB_ON if web and key != "deepseek" else WEB_OFF

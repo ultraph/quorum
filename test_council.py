@@ -7,6 +7,7 @@ import random
 import re
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import council
@@ -58,11 +59,13 @@ class LogicTests(unittest.TestCase):
         self.assertEqual(council.synthesizer("codex", ["codex", "gemini", "deepseek", "claude"], "council"), "claude")
         self.assertEqual(council.synthesizer("claude", ["claude", "deepseek"], "council"), "codex")
 
-def fake_config():
+def fake_config(gemini_cli=True):
     return q.Config(panel=[
         q.Model(name="claude", provider="anthropic", model="claude-opus-5-5", auth="cli"),
         q.Model(name="gpt", provider="openai", model="gpt-6.1-sol", auth="cli"),
         q.Model(name="deepseek-pro", provider="deepseek", model="deepseek-v4-pro", api_key="x"),
+        q.Model(name="gemini", provider="gemini", model="gemini-3.8-flash-high",
+                auth="cli" if gemini_cli else "manual"),
     ])
 
 
@@ -96,7 +99,8 @@ class FlowTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.env = patch.dict(os.environ, {"QUORUM_RUNS_DIR": self.tmp.name})
         self.env.start()
-        self.patches = [patch.object(q, "load_config", fake_config),
+        self.gemini_cli = True
+        self.patches = [patch.object(q, "load_config", lambda: fake_config(self.gemini_cli)),
                         patch.object(q, "run_model", side_effect=fake_run_model)]
         self.calls = self.patches[1].start()
         self.patches[0].start()
@@ -141,6 +145,7 @@ class FlowTests(unittest.TestCase):
         asyncio.run(go())
 
     def test_duel_gemini_judge_validates_paste(self):
+        self.gemini_cli = False  # Gemini connected as «вручную»
         async def go():
             run = self.new_run("duel", judge="gemini")
             await webapp._execute_council(run)
@@ -155,7 +160,28 @@ class FlowTests(unittest.TestCase):
             self.assertEqual(run["ranking"][0]["label"], "B")
         asyncio.run(go())
 
+    def test_duel_gemini_subscription_judges_automatically(self):
+        async def go():
+            run = self.new_run("duel", judge="gemini")
+            await webapp._execute_council(run)
+            self.assertNotIn("judge", run["pending"])
+            self.assertEqual(run["results"]["judge"]["provider"], "gemini")
+            self.assertTrue(run["final_done"])
+        asyncio.run(go())
+
+    def test_council_gemini_subscription_is_automatic(self):
+        async def go():
+            run = self.new_run("council")
+            await webapp._execute_council(run)
+            self.assertEqual(run["pending"], ["author:grok"])
+            self.assertEqual(run["results"]["author:gemini"]["answer"], "answer by gemini")
+            await self.manual(run, {"key": "author:grok", "text": "answer by grok"})
+            run = webapp.runs.load(run["id"])
+            self.assertEqual(len(run["ranking"]), 5)
+        asyncio.run(go())
+
     def test_council_manual_authors_and_no_self_review(self):
+        self.gemini_cli = False
         async def go():
             run = self.new_run("council")
             await webapp._execute_council(run)
@@ -204,6 +230,38 @@ class FlowTests(unittest.TestCase):
             self.assertEqual(names[0], "gpt")  # Claude's answer was not recomputed
             self.assertNotIn("claude", names[:1])
         asyncio.run(go())
+
+
+class AgyTests(unittest.TestCase):
+    """`agy -p` output parsing; subprocess is faked, nothing is launched."""
+    def run_agy(self, payload, prompt="hi", web=False):
+        m = q.Model(name="gemini", provider="gemini", model="gemini-3.8-flash-high", auth="cli")
+        seen = {}
+
+        def fake_run(cmd, **kw):
+            seen["cmd"], seen["cwd"] = cmd, kw.get("cwd")
+            seen["file"] = os.path.exists(os.path.join(kw["cwd"], "task.md"))
+            return SimpleNamespace(stdout=json.dumps(payload), stderr="", returncode=0)
+        with patch.object(q, "_bin_ok", return_value=True), patch.object(q.subprocess, "run", fake_run):
+            answer = q._cli_agy(m, prompt, web)
+        return answer, m, seen
+
+    def test_answer_and_usage(self):
+        answer, m, seen = self.run_agy({"status": "SUCCESS", "response": " ok \n",
+                                        "usage": {"input_tokens": 10, "cache_read_tokens": 5, "output_tokens": 3}})
+        self.assertEqual((answer, m.tokens_in, m.tokens_out), ("ok", 15, 3))
+        self.assertIn("--sandbox", seen["cmd"])
+        self.assertTrue(seen["cmd"][-1].startswith("--print=hi"))
+        self.assertFalse(seen["file"])
+
+    def test_empty_answer_is_an_error(self):
+        with self.assertRaisesRegex(RuntimeError, "пустой ответ.*command"):
+            self.run_agy({"status": "SUCCESS", "response": "", "denied_actions": [{"action": "command"}]})
+
+    def test_long_prompt_goes_through_a_file(self):
+        _, _, seen = self.run_agy({"status": "SUCCESS", "response": "ok"}, prompt="я" * 60_000)
+        self.assertTrue(seen["file"])
+        self.assertIn("task.md", seen["cmd"][-1])
 
 
 if __name__ == "__main__":

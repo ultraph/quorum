@@ -285,6 +285,11 @@ def load_config() -> Config:
         if m.provider in ("anthropic", "openai", "xai"):
             m.auth = override.get("auth", m.auth)
             m.api_key = override.get("api_key", m.api_key)
+        elif m.provider == "gemini" and override.get("auth") in ("cli", "manual"):
+            # Web choice: Google subscription via `agy`, or manual paste.
+            m.auth = override["auth"]
+            if m.auth == "cli":
+                m.model = override.get("model") or AGY_MODEL
     jt = raw.get("judge", {})
     judge_enabled = jt.get("enabled", True)
     judge = None
@@ -560,12 +565,70 @@ def _cli_codex(m: Model, prompt: str, web_tools: bool = False) -> str:
         return answer
 
 
+# Gemini through the Antigravity CLI (`agy`, Google subscription OAuth).
+# Measured 20.11.2026 (agy 1.5.13): only Gemini 3.8 Flash is offered, High is
+# the strongest; web search (search_web) works in print mode, page reading
+# (read_url_content) is not used by the model even when `read_url(*)` is
+# allowed — kept allowed in case it starts working. A tool the session may
+# not use is auto-denied and the answer comes back EMPTY with exit 0, so the
+# prompt states the tool rules and an empty answer is an error.
+AGY_MODEL = "gemini-3.8-flash-high"
+AGY_SETTINGS = json.dumps({"permissions": {"allow": ["read_url(*)"], "deny": [], "ask": []},
+                           "allowNonWorkspaceAccess": False})
+AGY_ARG_LIMIT = 100_000  # bytes; Linux caps one argv string at 128 KiB
+
+
+def _cli_agy(m: Model, prompt: str, web_tools: bool = False) -> str:
+    binp = _find_bin("agy", m.cli_bin)
+    if not _bin_ok(binp):
+        raise RuntimeError("agy CLI not found — install Antigravity CLI and sign in with Google")
+    rule = ("\n\n[Tools: you may use web search (search_web) and page reading (read_url_content) "
+            "if available. Never run terminal commands; never read or write files.]" if web_tools
+            else "\n\n[Tools: answer from your knowledge and the material above; do not use any tools.]")
+    text = prompt + rule
+    with tempfile.TemporaryDirectory() as td:
+        # Empty throwaway workspace; long prompts go in as a file there.
+        if len(text.encode()) > AGY_ARG_LIMIT:
+            (Path(td) / "task.md").write_text(text)
+            text = ("The whole task is in the file task.md in the current directory. Read it with "
+                    "view_file and do exactly what it says. Never run terminal commands; do not "
+                    "read or write any other file." + (" Web search is allowed." if web_tools else ""))
+        cmd = [binp, "--model", m.model, "--sandbox", "--output-format", "json",
+               "--print-timeout", "400s", "--settings", AGY_SETTINGS, f"--print={text}"]
+        p = subprocess.run(cmd, cwd=td, stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=420)
+    data = None
+    for line in reversed(p.stdout.strip().splitlines()):
+        if line.startswith("{"):
+            try:
+                data = json.loads(line)
+                break
+            except ValueError:
+                continue
+    if data is None:
+        raise RuntimeError((p.stderr or p.stdout or "agy failed").strip()[-400:])
+    if data.get("status") != "SUCCESS":
+        raise RuntimeError(f"agy: {data.get('error') or data.get('status')}"[:400])
+    answer = (data.get("response") or "").strip()
+    if not answer:
+        denied = ", ".join(d.get("action", "?") for d in data.get("denied_actions") or [])
+        raise RuntimeError("Gemini (agy) вернул пустой ответ" +
+                           (f": модель потянулась к запрещённому инструменту ({denied})" if denied else ""))
+    usage = data.get("usage") or {}
+    m.tokens_in = int(usage.get("input_tokens", 0)) + int(usage.get("cache_read_tokens", 0))
+    m.tokens_out = int(usage.get("output_tokens", 0))
+    m.served_model = m.model
+    return answer
+
+
 def call_model(m: Model, prompt: str, web_tools: bool = False) -> str:
     if m.auth == "cli":
         if m.provider == "anthropic":
             return _cli_claude(m, prompt, web_tools)
         if m.provider == "openai":
             return _cli_codex(m, prompt, web_tools)
+        if m.provider == "gemini":
+            return _cli_agy(m, prompt, web_tools)
         raise RuntimeError(f"auth=cli unsupported for provider '{m.provider}'")
     # auth == api
     if m.provider == "anthropic":

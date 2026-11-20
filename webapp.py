@@ -237,6 +237,8 @@ def api_models() -> JSONResponse:
             return "high"
         if m.provider == "xai" and m.auth == "manual":
             return "вручную"
+        if m.provider == "gemini" and m.auth == "cli":
+            return m.model.rsplit("-", 1)[-1] if m.model.endswith(("-high", "-medium", "-low")) else "авто"
         return "авто"
     def item(m: q.Model) -> dict:
         return {"name": m.name, "provider": m.provider, "model": m.model,
@@ -263,6 +265,35 @@ async def claude_connection(req: Request) -> JSONResponse:
 @app.post("/api/connections/gpt")
 async def gpt_connection(req: Request) -> JSONResponse:
     return await update_connection(req, "openai")
+
+
+@app.post("/api/connections/gemini")
+async def gemini_connection(req: Request) -> JSONResponse:
+    """Gemini: Google subscription through `agy` (automatic) or manual paste."""
+    origin = req.headers.get("origin")
+    if (origin and urllib.parse.urlsplit(origin).netloc != req.headers.get("host")) or not req.headers.get("content-type", "").startswith("application/json"):
+        return JSONResponse({"error": "Запрос должен исходить из интерфейса Quorum."}, status_code=403)
+    body = await req.json()
+    auth = body.get("auth")
+    if auth not in ("cli", "manual"):
+        return JSONResponse({"error": "Выберите способ подключения."}, status_code=400)
+    if auth == "cli":
+        def models_list() -> str:
+            done = subprocess.run([q._find_bin("agy"), "models"], capture_output=True, text=True,
+                                  timeout=40, stdin=subprocess.DEVNULL)
+            return done.stdout
+        try:
+            listed = await asyncio.to_thread(models_list)
+        except (OSError, subprocess.TimeoutExpired):
+            listed = ""
+        if q.AGY_MODEL not in listed:
+            return JSONResponse({"error": f"agy не отдал модель {q.AGY_MODEL}: нет входа через Google или CLI не установлен."},
+                                status_code=400)
+    if body.get("test_only") is True:
+        return JSONResponse({"message": "Вход в agy через подписку Google подтверждён, модель доступна." if auth == "cli"
+                             else "Ручной режим: ответ Gemini вставляется из чата."})
+    await asyncio.to_thread(connections.save_claude, q.CONFIG_PATH, auth, None, False, "gemini")
+    return JSONResponse({"message": "Подключение сохранено. Применится к следующему запуску."})
 
 
 @app.post("/api/connections/grok")
@@ -903,9 +934,12 @@ def _council_models(cfg) -> dict:
     enabled = [m for m in cfg.panel if m.enabled]
     deepseek = (next((m for m in enabled if m.provider == "deepseek" and m.model == "deepseek-v4-pro"), None)
                 or next((m for m in enabled if m.provider == "deepseek"), None))
+    gemini = next((m for m in enabled if m.provider == "gemini"), None)
     return {"claude": next((m for m in enabled if m.provider == "anthropic"), None),
             "codex": next((m for m in enabled if m.provider == "openai"), None),
-            "deepseek": deepseek}
+            "deepseek": deepseek,
+            # Automatic only through the Google subscription (agy); otherwise pasted by hand.
+            "gemini": gemini if gemini and gemini.auth == "cli" else None}
 
 
 def _ok(res: dict, stage: str) -> bool:
@@ -975,6 +1009,7 @@ async def _council_flow(run: dict) -> str:
     question = _with_material(run["question"], run.get("attachments", []))
     today = time.strftime("%d.%m.%Y")
     authors = council.AUTHORS[mode]
+    auto = council.AUTO + (("gemini",) if models.get("gemini") else ())
     needed = [k for k in authors if k in council.AUTO]
     if mode == "council" or run.get("judge") == "deepseek":
         needed.append("deepseek")
@@ -985,16 +1020,17 @@ async def _council_flow(run: dict) -> str:
 
     # 1. Independent answers: manual prompts first, so the user can paste
     # while the automatic authors are still writing.
-    manual = [k for k in authors if k in council.MANUAL]
+    manual = [k for k in authors if k not in auto]
     if manual:
         _request(run, [_paste_item(f"author:{k}", k, "ответ автора",
-                                   council.author_prompt(question, today, k, run["web"]), True)
+                                   council.author_prompt(question, today, k, run["web"], True), True)
                        for k in manual if f"author:{k}" not in res and f"author:{k}" not in skipped])
-    todo = [k for k in authors if k in council.AUTO and not _ok(res, f"author:{k}")]
+    todo = [k for k in authors if k in auto and not _ok(res, f"author:{k}")]
     if todo:
-        await _council_call(run, [(f"author:{k}", models[k], council.author_prompt(question, today, k, run["web"]),
+        await _council_call(run, [(f"author:{k}", models[k],
+                                   council.author_prompt(question, today, k, run["web"], False),
                                    run["web"] and k != "deepseek") for k in todo])
-    failed = [council.NAMES[k] for k in authors if k in council.AUTO and not _ok(res, f"author:{k}")]
+    failed = [council.NAMES[k] for k in authors if k in auto and not _ok(res, f"author:{k}")]
     if failed:
         return _fail(run, "Не ответили: " + ", ".join(failed) + ". «Продолжить» повторит только их.")
     if any(f"author:{k}" not in res and f"author:{k}" not in skipped for k in manual):
@@ -1008,10 +1044,11 @@ async def _council_flow(run: dict) -> str:
     if mode == "duel":
         if not _ok(res, "judge"):
             prompt = council.duel_judge_prompt(question, answers, labels)
-            if run.get("judge") == "gemini":
+            if run.get("judge") == "gemini" and not models.get("gemini"):
                 _request(run, [_paste_item("judge", "gemini", "судья: выбрать победителя", prompt, False)])
                 return "waiting"
-            await _council_call(run, [("judge", models["deepseek"], prompt, False)])
+            judge = models["gemini"] if run.get("judge") == "gemini" else models["deepseek"]
+            await _council_call(run, [("judge", judge, prompt, False)])
             if _ok(res, "judge") and not council.parse_winner(res["judge"]["answer"], by_label):
                 # Re-shown with the error; cost None so the spend is not counted twice.
                 res["judge"] = {**res["judge"], "error": "Судья не закончил ответ строкой WINNER: A/B.",
@@ -1124,7 +1161,8 @@ async def api_council(req: Request):
         return JSONResponse({"error": "Нужны режим и вопрос."}, status_code=400)
     run = runs.new(question, "", "")
     run.update(mode=mode, web=bool(body.get("web", True)),
-               judge="gemini" if mode == "duel" and body.get("judge") == "gemini" else "deepseek",
+               # Duel judge: Gemini by default (owner's decision 20.11.2026), DeepSeek on request.
+               judge="deepseek" if body.get("judge") == "deepseek" else "gemini",
                attachments=_clean_attachments(body.get("attachments")),
                results={}, skipped=[], requested=[], pending=[])
     return await _start(run)
@@ -1539,25 +1577,25 @@ INDEX_HTML = r"""<!doctype html>
       <div class="table-wrap"><table class="mtable">
         <tr><th></th><th>🔎 Фактчек</th><th>⚔ Дуэль</th><th>🏛 Совет</th></tr>
         <tr><td>Для чего</td><td>Проверить твит, новость, проект, «правда ли…»: что правда и что делать</td><td>Обычное решение или текст: быстро получить лучшую из двух версий</td><td>Большое решение: деньги, архитектура, долгие последствия</td></tr>
-        <tr><td>Кто пишет</td><td>Цепочка: Grok ищет → Claude анализ → Codex проверка → Claude финал</td><td>Claude и Codex — параллельно, не видя друг друга</td><td>Claude, Codex, DeepSeek + Grok и Gemini (вручную) — каждый свой ответ</td></tr>
-        <tr><td>Кто выбирает</td><td>Нет выбора — последовательная проверка</td><td>Судья DeepSeek (авто) или Gemini (вручную): ответы под метками A/B в случайном порядке</td><td>Claude, Codex, DeepSeek оценивают чужие ответы вслепую, свой — никогда; итог по сумме мест (Borda)</td></tr>
+        <tr><td>Кто пишет</td><td>Цепочка: Grok ищет → Claude анализ → Codex проверка → Claude финал</td><td>Claude и Codex — параллельно, не видя друг друга</td><td>Claude, Codex, DeepSeek, Gemini (подписка через agy) + Grok вручную — каждый свой ответ</td></tr>
+        <tr><td>Кто выбирает</td><td>Нет выбора — последовательная проверка</td><td>Судья Gemini (по умолчанию, подписка через agy) или DeepSeek (API): ответы под метками A/B в случайном порядке</td><td>Claude, Codex, DeepSeek оценивают чужие ответы вслепую, свой — никогда; итог по сумме мест (Borda)</td></tr>
         <tr><td>Финал</td><td>Claude, до 220 слов</td><td>Проигравший автор: основа — победитель + лучшее из своего</td><td>Claude; если победил ответ Claude — Codex</td></tr>
         <tr><td>Критик</td><td>—</td><td colspan="2">Grok вручную, по желанию: разносит финал → кнопка «Учесть критику» переписывает его</td></tr>
-        <tr><td>Ручных вставок</td><td>1 — Grok, до запуска</td><td>0–2 — Gemini-судья, Grok-критик</td><td>2–3 — Grok и Gemini как авторы, Grok-критик</td></tr>
+        <tr><td>Ручных вставок</td><td>1 — Grok, до запуска</td><td>0–1 — Grok-критик</td><td>1–2 — Grok как автор, Grok-критик</td></tr>
         <tr><td>Время</td><td>≈3–4 мин (медиана прогонов)</td><td>≈5 мин (замер)</td><td>≈3–5 мин + твои вставки (замер)</td></tr>
-        <tr><td>Деньги</td><td>Claude/Codex — подписка</td><td>подписка + DeepSeek-судья ≈ $0.01</td><td>подписка + DeepSeek ≈ $0.02–0.05</td></tr>
+        <tr><td>Деньги</td><td>Claude/Codex — подписка</td><td>подписка; с судьёй DeepSeek ≈ $0.04</td><td>подписка + DeepSeek ≈ $0.02–0.05</td></tr>
       </table></div>
-      <strong>Как работать с ручными вставками (Grok, Gemini)</strong>
+      <strong>Как работать с ручными вставками (Grok; Gemini — если в «Подключение Gemini» выбрано «вручную»)</strong>
       <ol style="margin:6px 0 10px;padding-left:20px">
         <li>Выбери режим, опиши задачу, запусти.</li>
         <li>Появится карточка ✋: «Скопировать промпт» → вставь в чат Grok или Gemini → скопируй ответ целиком → «Отправить». Пока ты копируешь, Claude, Codex и DeepSeek уже работают.</li>
         <li>Не хочешь ждать кого-то из ручных авторов — «Пропустить»: сравнение пойдёт по оставшимся ответам.</li>
-        <li>Gemini-судья обязан закончить ответ строкой WINNER: A или WINNER: B — промпт это требует, без неё вставка не примется.</li>
+        <li>Gemini-судья (и автоматический, и вставленный вручную) обязан закончить ответ строкой WINNER: A или WINNER: B — без неё вердикт не примется.</li>
         <li>Прогон ждёт тебя сколько угодно (⏸ в истории): страницу можно закрыть и вернуться.</li>
         <li>Упал шаг — «↻ Продолжить»: повторится только упавший шаг, готовые не пересчитываются.</li>
         <li>После финала — беседа с Claude или Codex по всему материалу; в «Дуэли» и «Совете» авторы в ней уже раскрыты.</li>
       </ol>
-      <div class="foot">Слепота: модели видят ответы только под буквами в случайном порядке; кто есть кто — видно лишь в таблице итога. Время «Дуэли» и «Совета» — по первым прогонам 20.11.2026; в «Дуэли» дольше всех судья DeepSeek (≈2 мин). «Учесть критику» открывает ссылки критика в вебе — это ещё ≈0,5–1 мин.</div>
+      <div class="foot">Gemini через agy — это подписка Google AI Plus, модель Gemini 3.8 Flash (High), лучшая из доступных в agy (Pro там нет); ищет в вебе, но страницы целиком не открывает. Слепота: модели видят ответы только под буквами в случайном порядке; кто есть кто — видно лишь в таблице итога. Время «Дуэли» и «Совета» — по первым прогонам 20.11.2026; в «Дуэли» дольше всех судья DeepSeek (≈2 мин). «Учесть критику» открывает ссылки критика в вебе — это ещё ≈0,5–1 мин.</div>
     </div>
   </details>
   <div class="card">
@@ -1569,8 +1607,8 @@ INDEX_HTML = r"""<!doctype html>
     <div class="foot" id="modeDesc" style="margin:0 0 12px"></div>
     <div id="councilOpts" class="row" style="margin:0 0 12px" hidden>
       <label id="judgeBox" style="margin:0">Судья
-        <select id="duelJudge"><option value="deepseek">DeepSeek — автоматически</option><option value="gemini">Gemini — вручную</option></select></label>
-      <label style="margin:0"><input type="checkbox" id="councilWeb" checked> Claude и Codex ищут в вебе (дольше, точнее)</label>
+        <select id="duelJudge"><option value="gemini" selected>Gemini — по подписке (agy)</option><option value="deepseek">DeepSeek — API</option></select></label>
+      <label style="margin:0"><input type="checkbox" id="councilWeb" checked> Авторы ищут в вебе (дольше, точнее)</label>
     </div>
     <div class="row" style="margin:0 0 12px"><label for="runHistory" style="margin:0">История прогонов</label>
       <select id="runHistory" style="flex:1;min-width:0"></select></div>
@@ -1598,6 +1636,22 @@ INDEX_HTML = r"""<!doctype html>
           </div>
           <div class="foot" id="grokConnectionStatus" role="status"></div>
           <div class="foot">Модель сохраняется. Изменение действует со следующего запуска и общее для этой установки Quorum.</div>
+        </div>
+      </details>
+      <details class="pipeline-models conn" id="geminiConnectionSettings">
+        <summary style="cursor:pointer">Подключение Gemini: подписка Google (agy) / вручную</summary>
+        <div style="margin-top:12px">
+          <label for="geminiAuth">Способ подключения</label>
+          <select id="geminiAuth">
+            <option value="cli">Подписка Google · agy, Gemini 3.8 Flash (High), с поиском в вебе</option>
+            <option value="manual">Вручную · копировать промпт в чат Gemini</option>
+          </select>
+          <div class="row" style="margin-top:12px">
+            <button type="button" id="testGeminiConnection" class="ghost">Проверить подключение</button>
+            <button type="button" id="saveGeminiConnection">Сохранить</button>
+          </div>
+          <div class="foot" id="geminiConnectionStatus" role="status"></div>
+          <div class="foot">Действует в «Дуэли» и «Совете» со следующего запуска. Через agy доступна только Gemini 3.8 Flash; она ищет в вебе, но страницы целиком не открывает.</div>
         </div>
       </details>
       <details class="pipeline-models conn" id="connectionSettings">
@@ -1733,9 +1787,9 @@ function applyGrokMode(){
 const MODES={
   pipeline:{desc:'Фактчек: Grok собирает факты (веб + X), Claude пишет анализ, GPT/Codex проверяет, Claude выдаёт короткое решение.',
     flow:'Grok ищет → Claude проверяет источники → GPT/Codex делает ревью → Claude готовит финал', btn:'Run pipeline'},
-  duel:{desc:'Дуэль: Claude и Codex пишут вслепую, судья выбирает победителя, проигравший собирает финал. Grok-критик — по желанию.',
+  duel:{desc:'Дуэль: Claude и Codex пишут вслепую, судья (по умолчанию Gemini по подписке) выбирает победителя, проигравший собирает финал. Grok-критик — по желанию.',
     flow:'Claude ‖ Codex → судья → финал → Grok-критик (по желанию)', btn:'⚔ Запустить дуэль'},
-  council:{desc:'Совет: пять авторов (Grok и Gemini — вручную), слепая взаимная оценка без самооценки, финал пишет Claude (если победил Claude — Codex).',
+  council:{desc:'Совет: пять авторов (Gemini — по подписке, Grok — вручную), слепая взаимная оценка без самооценки, финал пишет Claude (если победил Claude — Codex).',
     flow:'Claude ‖ Codex ‖ DeepSeek ‖ Grok ‖ Gemini → слепая оценка → финал → Grok-критик (по желанию)', btn:'🏛 Созвать совет'},
 };
 let MODE='pipeline';
@@ -1757,8 +1811,17 @@ let MODELS_DATA=null;
 function modelLine(m,name){
   const label=m.pricing ? m.pricing.label : name+' '+m.model;
   const a=m.account||{};
-  const warn=(m.auth==='api' && !m.has_api_key) || (m.auth==='cli' && a.status!=='signed_in');
+  const warn=(m.auth==='api' && !m.has_api_key) || (m.auth==='cli' && m.account && a.status!=='signed_in');
   return `<strong>${esc(label)}</strong> (${esc(modelMeta(m))})${warn?' ⚠':''}`;
+}
+async function changeGemini(testOnly){
+  const st=document.getElementById('geminiConnectionStatus'); st.textContent='Проверяю подключение…';
+  try{
+    const r=await fetch('/api/connections/gemini',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({auth:document.getElementById('geminiAuth').value,test_only:testOnly})});
+    const d=await r.json(); st.textContent=d.message||d.error||'';
+    if(r.ok && !testOnly){ document.getElementById('geminiConnectionSettings').open=false; await loadPipelineModels(); }
+  }catch(e){ st.textContent=String(e.message||e); }
 }
 function renderModelsSummary(){
   const data=MODELS_DATA; if(!data) return;
@@ -1767,15 +1830,22 @@ function renderModelsSummary(){
   const claude=by('anthropic'), gpt=by('openai'), grok=by('xai');
   const deepseek=data.panel.find(m=>m.provider==='deepseek' && m.model==='deepseek-v4-pro' && m.enabled)
     || data.panel.find(m=>m.provider==='deepseek' && m.enabled);
+  const gemini=data.panel.find(m=>m.provider==='gemini');
+  const geminiAuto=!!(gemini && gemini.auth==='cli');
+  const gLabel=geminiAuto ? gemini.model.replace('gemini-','Gemini ').replace('-flash',' Flash').replace(/-(high|medium|low)$/,(x,y)=>' ('+y[0].toUpperCase()+y.slice(1)+')') : 'Gemini';
+  const gm=geminiAuto ? `<strong>${esc(gLabel)}</strong> (подписка, agy)` : '<strong>Gemini</strong> (вручную)';
+  const jg=document.querySelector('#duelJudge option[value="gemini"]');
+  if(jg) jg.textContent=geminiAuto ? 'Gemini — по подписке (agy)' : 'Gemini — вручную';
+  if(!document.getElementById('geminiConnectionSettings').open) document.getElementById('geminiAuth').value=geminiAuto?'cli':'manual';
   const ds=deepseek ? `<strong>${esc(deepseek.pricing?deepseek.pricing.label:deepseek.model)}</strong> (API)` : '<strong>DeepSeek</strong> ⚠ не включён';
   const manual=n=>`<strong>${n}</strong> (вручную)`;
   const pair=[claude&&modelLine(claude,'Claude'), gpt&&modelLine(gpt,'GPT')].filter(Boolean);
   let short;
   if(MODE==='duel'){
-    const judge=document.getElementById('duelJudge').value==='gemini' ? manual('Gemini') : ds;
+    const judge=document.getElementById('duelJudge').value==='gemini' ? gm : ds;
     short=pair.join(' ‖ ')+' → судья: '+judge+' → критик: '+manual('Grok')+', по желанию';
   } else if(MODE==='council'){
-    short='авторы: '+pair.concat([ds, manual('Grok'), manual('Gemini')]).join(' ‖ ')+
+    short='авторы: '+pair.concat([ds, gm, manual('Grok')]).join(' ‖ ')+
       ' → оценка: Claude, GPT, DeepSeek → критик: '+manual('Grok')+', по желанию';
   } else {
     short=[grok&&modelLine(grok,'Grok'), claude&&modelLine(claude,'Claude'), gpt&&modelLine(gpt,'GPT')]
@@ -1786,10 +1856,12 @@ function renderModelsSummary(){
   box.innerHTML=list.filter(Boolean).map(fmtModel).join('')+
     (MODE!=='pipeline' && deepseek ? `<div style="margin:6px 0"><strong>DeepSeek: ${esc(deepseek.pricing?deepseek.pricing.label:deepseek.model)}</strong> (API)`+
       (deepseek.pricing?`<div class="foot">Regular API Price $${deepseek.pricing.input_per_m}/$${deepseek.pricing.output_per_m} за 1M in/out</div>`:'')+'</div>' : '')+
-    (MODE!=='pipeline' ? '<div class="foot">Grok и Gemini в этом режиме — только ручная вставка из их чатов.</div>' : '')+
+    (MODE!=='pipeline' && geminiAuto ? `<div style="margin:6px 0"><strong>Gemini: ${esc(gLabel)}</strong> (подписка Google через agy)<div class="foot">Ищет в вебе; страницы целиком не открывает.</div></div>` : '')+
+    (MODE!=='pipeline' ? `<div class="foot">${geminiAuto?'Grok в этом режиме — только ручная вставка из чата.':'Grok и Gemini в этом режиме — только ручная вставка из их чатов.'}</div>` : '')+
     '<div class="foot" style="margin-bottom:10px">Статус аккаунтов проверяется через CLI раз в минуту. Regular API Price — справочная цена API.</div>';
   // Grok's API/manual switch only matters for the fact-check.
   document.getElementById('grokConnectionSettings').hidden=MODE!=='pipeline';
+  document.getElementById('geminiConnectionSettings').hidden=MODE==='pipeline';
 }
 async function loadPipelineModels(){
   const box=document.getElementById('pipelineModels');
@@ -2228,7 +2300,7 @@ async function openRun(id){
 async function runCouncil(question){
   const status=document.getElementById('pipelineStatus');
   status.className='foot';
-  status.textContent=MODE==='duel' ? 'Запускаю дуэль: Claude ‖ Codex…' : 'Созываю совет: Claude ‖ Codex ‖ DeepSeek, Grok и Gemini — вручную…';
+  status.textContent=MODE==='duel' ? 'Запускаю дуэль: Claude ‖ Codex…' : 'Созываю совет: Claude ‖ Codex ‖ DeepSeek ‖ Gemini, Grok — вручную…';
   const resp=fetch('/api/council',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({mode:MODE,question:question,attachments:PIPE_FILES,
       judge:document.getElementById('duelJudge').value,web:document.getElementById('councilWeb').checked})});
@@ -2325,6 +2397,8 @@ function addCopyActions(cardEl, text, slug){
 document.getElementById('runPipeline').addEventListener('click',runPipeline);
 document.querySelectorAll('.mode-btn').forEach(b=>b.addEventListener('click',()=>setMode(b.dataset.mode)));
 document.getElementById('duelJudge').addEventListener('change',renderModelsSummary);
+document.getElementById('testGeminiConnection').addEventListener('click',()=>changeGemini(true));
+document.getElementById('saveGeminiConnection').addEventListener('click',()=>changeGemini(false));
 (function(){
   let saved='pipeline', closed=false;
   try{ saved=localStorage.getItem('mode')||'pipeline'; closed=localStorage.getItem('manualClosed')==='1'; }catch(e){}
