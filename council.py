@@ -156,7 +156,15 @@ marked [критично], [важно] or [мелочь], with a one-line fix. 
 APPLY = """\
 You wrote the final answer below. A critic whose job is to disagree attacked
 it. Revise the final answer: accept only the criticism that is correct and
-matters (check it; a critic can be wrong), keep everything else. Same rules:
+matters (check it; a critic can be wrong), keep everything else.
+- New facts the critic found with a source (names, numbers, quotes from a
+  linked page) are evidence: carry the specific fact into the answer
+  explicitly, with its URL, not a vague mention.
+- Never drop a check, step or fact just because the critic calls it
+  impractical or unlikely to be done: first ask who would do it (the user's
+  own team may do what the end client would not), then adjust it. Remove an
+  item only if it is wrong.
+Same rules:
 the user's language, at most about 400 words, recommendation first, full EVM
 addresses, no mention of the process or models. Finish with a short section
 "Что изменилось после критики" (2–4 bullets; "ничего существенного" if the
